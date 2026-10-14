@@ -20,18 +20,18 @@ mod logging;
 mod mux;
 mod pipeline;
 mod prelude;
+mod record;
 mod ring;
 mod rt;
 mod settings;
+mod theme;
 mod util;
 
 use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, LPARAM, WPARAM};
 use windows::Win32::Media::MediaFoundation::{MF_VERSION, MFSTARTUP_FULL, MFShutdown, MFStartup};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
 use windows::Win32::System::Threading::CreateMutexW;
-use windows::Win32::UI::Controls::{
-    ICC_HOTKEY_CLASS, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx,
-};
+use windows::Win32::UI::Controls::{ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx};
 use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
 use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, PostMessageW};
 use windows::core::w;
@@ -66,7 +66,7 @@ fn main() {
         }
         let _ = InitCommonControlsEx(&INITCOMMONCONTROLSEX {
             dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
-            dwICC: ICC_HOTKEY_CLASS | ICC_STANDARD_CLASSES,
+            dwICC: ICC_STANDARD_CLASSES,
         });
 
         let dir = Config::dir();

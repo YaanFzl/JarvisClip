@@ -97,3 +97,16 @@ pub fn glyph(size: u32, rgb: [u8; 3], opacity: f32) -> Vec<u8> {
         c.map(|x| x * opacity)
     })
 }
+
+/// The tray mark with a red dot in the corner, shown while recording.
+pub fn glyph_recording(size: u32, rgb: [u8; 3]) -> Vec<u8> {
+    const RED: [f32; 3] = [0xe8 as f32 / 255.0, 0x3b as f32 / 255.0, 0x3b as f32 / 255.0];
+    let rgb = rgb.map(|c| c as f32 / 255.0);
+    render(size, 8.0, 48.0, |u, v| {
+        let (dx, dy) = (u - 46.0, v - 45.0);
+        let d2 = dx * dx + dy * dy;
+        // A clear ring around the dot keeps it apart from the circles.
+        let c = if d2 <= 11.5 * 11.5 { [0.0; 4] } else { circles([0.0; 4], u, v, rgb) };
+        if d2 <= 9.0 * 9.0 { over(c, RED, 1.0) } else { c }
+    })
+}

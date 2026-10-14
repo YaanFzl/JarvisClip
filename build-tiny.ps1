@@ -7,8 +7,8 @@
     with size optimizations and the immediate-abort panic strategy, and no C
     runtime is linked at all (see src/rt.rs). Produces:
 
-      dist\bufferless-small.exe   unpacked (~107 KB)
-      dist\bufferless-tiny.exe    packed with UPX (~55 KB)
+      dist\bufferless-small.exe   unpacked (~165 KB)
+      dist\bufferless-tiny.exe    packed with UPX (~80 KB)
 
     UPX-packed executables are more likely to be flagged by antivirus
     heuristics, so share the small or standard build instead. The standard

@@ -209,6 +209,13 @@ pub mod fs {
         File::create(path)?.write_all(data)
     }
 
+    pub fn remove(path: &str) {
+        let p = wide(path);
+        unsafe {
+            let _ = DeleteFileW(PCWSTR(p.as_ptr()));
+        }
+    }
+
     fn attributes(path: &str) -> Option<WIN32_FILE_ATTRIBUTE_DATA> {
         let p = wide(path);
         let mut data = WIN32_FILE_ATTRIBUTE_DATA::default();
@@ -264,6 +271,11 @@ pub mod fs {
             }
             Ok(())
         }
+
+        /// Move to an absolute position.
+        pub fn seek(&mut self, pos: u64) -> Result<()> {
+            unsafe { SetFilePointerEx(self.0, pos as i64, None, FILE_BEGIN) }
+        }
     }
 
     impl Drop for File {
@@ -301,6 +313,12 @@ pub mod fs {
             self.file.write_all(&self.buf)?;
             self.buf.clear();
             Ok(())
+        }
+
+        /// Flush, then move to an absolute position.
+        pub fn seek(&mut self, pos: u64) -> Result<()> {
+            self.flush()?;
+            self.file.seek(pos)
         }
     }
 }

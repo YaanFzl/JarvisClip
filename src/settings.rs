@@ -1,18 +1,24 @@
-//! Settings window built from plain Win32 controls.
+//! Settings window built from plain Win32 controls, in two columns.
 
 use crate::prelude::*;
 
 use core::cell::RefCell;
 
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::*;
 use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow, SystemParametersInfoForDpi};
-use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, MOD_ALT, MOD_CONTROL, MOD_SHIFT, SetFocus};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    EnableWindow, GetKeyState, IsWindowEnabled, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN, SetFocus, VK_BACK,
+    VK_CONTROL, VK_DELETE, VK_ESCAPE, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL, VK_RMENU,
+    VK_RETURN, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_SNAPSHOT, VK_TAB,
+};
+use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
 use windows::Win32::UI::Shell::{
-    FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, SIGDN_FILESYSPATH,
+    DefSubclassProc, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog,
+    IShellItem, RemoveWindowSubclass, SHCreateItemFromParsingName, SIGDN_FILESYSPATH, SetWindowSubclass,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, w};
@@ -20,9 +26,10 @@ use windows::core::{PCWSTR, w};
 use crate::app;
 use crate::audio::{self, DeviceInfo};
 use crate::capture::{self, MonitorInfo};
-use crate::config::Config;
+use crate::config::{Config, Theme};
 use crate::rt::UiCell;
-use crate::util::{wide, window_text};
+use crate::theme::Palette;
+use crate::util::{hotkey_name, wide, window_text};
 
 const CLASS: PCWSTR = w!("BufferlessSettings");
 
@@ -42,6 +49,20 @@ const ID_SOUND: i32 = 112;
 const ID_AUTOSTART: i32 = 113;
 const ID_MIC_VOLUME: i32 = 114;
 const ID_CURSOR: i32 = 115;
+const ID_RECORD_HOTKEY: i32 = 116;
+const ID_STRETCH: i32 = 117;
+const ID_SYSTEM_DEVICE: i32 = 118;
+const ID_SEPARATE: i32 = 119;
+const ID_APP_TRACKS: i32 = 120;
+const ID_ADD_APP: i32 = 121;
+const ID_APP_HINT: i32 = 122;
+const ID_SOUND_FILE: i32 = 123;
+const ID_BROWSE_SOUND: i32 = 124;
+const ID_NOTIFY: i32 = 125;
+const ID_THEME: i32 = 126;
+
+/// Edit boxes, which get the field colours even when disabled.
+const FIELDS: [i32; 7] = [ID_HOTKEY, ID_RECORD_HOTKEY, ID_BITRATE, ID_MIC_VOLUME, ID_FOLDER, ID_APP_TRACKS, ID_SOUND_FILE];
 
 const LENGTHS: [(u32, &str); 9] = [
     (15, "15 seconds"),
@@ -55,15 +76,18 @@ const LENGTHS: [(u32, &str); 9] = [
     (1200, "20 minutes"),
 ];
 const RESOLUTIONS: [(u32, &str); 5] = [(0, "Native"), (1440, "1440p"), (1080, "1080p"), (900, "900p"), (720, "720p")];
-const FRAME_RATES: [u32; 6] = [30, 60, 90, 120, 144, 165];
+const FRAME_RATES: [u32; 8] = [30, 60, 90, 120, 144, 165, 240, 360];
+const THEMES: [&str; 3] = ["Same as Windows", "Light", "Dark"];
 
 struct Settings {
     hwnd: HWND,
     cfg: Config,
     monitors: Vec<MonitorInfo>,
     mics: Vec<DeviceInfo>,
+    outputs: Vec<DeviceInfo>,
     font: HFONT,
     heading_font: HFONT,
+    palette: Palette,
 }
 
 static STATE: UiCell<RefCell<Option<Settings>>> = UiCell::new(RefCell::new(None));
@@ -89,6 +113,13 @@ fn checked(hwnd: HWND, id: i32) -> bool {
 
 fn combo_index(hwnd: HWND, id: i32) -> usize {
     send(hwnd, id, CB_GETCURSEL, 0, 0).max(0) as usize
+}
+
+fn set_text(ctl: HWND, text: &str) {
+    let t = wide(text);
+    unsafe {
+        let _ = SetWindowTextW(ctl, PCWSTR(t.as_ptr()));
+    }
 }
 
 pub fn open(cfg: Config) {
@@ -142,13 +173,17 @@ pub fn open(cfg: Config) {
         heading.lfWeight = 600;
         let heading_font = CreateFontIndirectW(&heading);
 
-        let mut state = Settings {
+        let palette = Palette::new(crate::theme::is_dark(cfg.theme));
+        palette.apply_to_window(hwnd);
+        let state = Settings {
             hwnd,
             cfg,
             monitors: capture::list_monitors(),
             mics: audio::list_microphones(),
+            outputs: audio::list_outputs(),
             font,
             heading_font,
+            palette,
         };
         let (w, h) = state.build(dpi);
 
@@ -162,7 +197,7 @@ pub fn open(cfg: Config) {
         let work = mi.rcWork;
         let x = work.left + (work.right - work.left - ww) / 2;
         let y = work.top + (work.bottom - work.top - wh) / 2;
-        let _ = SetWindowPos(hwnd, None, x, y, ww, wh, SWP_NOZORDER);
+        let _ = SetWindowPos(hwnd, None, x, y.max(work.top), ww, wh, SWP_NOZORDER);
 
         STATE.with(|s| *s.borrow_mut() = Some(state));
         let _ = ShowWindow(hwnd, SW_SHOW);
@@ -172,15 +207,17 @@ pub fn open(cfg: Config) {
 }
 
 impl Settings {
-    /// Create all controls. Returns the client size.
-    fn build(&mut self, dpi: u32) -> (i32, i32) {
-        let s = |v: i32| v * dpi as i32 / 96;
-        let hwnd = self.hwnd;
-        let (label_x, ctl_x, ctl_w, row_h, row) = (s(20), s(170), s(270), s(24), s(32));
-        let width = ctl_x + ctl_w + s(20);
-        let mut y = s(14);
-
-        let create = |class: PCWSTR, text: &str, style: u32, ex: WINDOW_EX_STYLE, x, y, w, h, id: i32, font: HFONT| unsafe {
+    fn create(
+        &self,
+        class: PCWSTR,
+        text: &str,
+        style: u32,
+        ex: WINDOW_EX_STYLE,
+        (x, y, w, h): (i32, i32, i32, i32),
+        id: i32,
+        font: HFONT,
+    ) -> HWND {
+        unsafe {
             let text = wide(text);
             let ctl = CreateWindowExW(
                 ex,
@@ -191,7 +228,7 @@ impl Settings {
                 y,
                 w,
                 h,
-                Some(hwnd),
+                Some(self.hwnd),
                 Some(HMENU(id as isize as _)),
                 None,
                 None,
@@ -199,221 +236,177 @@ impl Settings {
             .unwrap_or_default();
             SendMessageW(ctl, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(1)));
             ctl
-        };
+        }
+    }
+
+    /// Create all controls. Returns the client size.
+    fn build(&self, dpi: u32) -> (i32, i32) {
+        let s = |v: i32| v * dpi as i32 / 96;
+        let (margin, label_w, ctl_w, row_h, row) = (s(20), s(150), s(250), s(24), s(32));
+        let col_w = label_w + ctl_w;
+        let width = margin + col_w + s(36) + col_w + margin;
+        let tab = WS_TABSTOP.0;
         let font = self.font;
-        let heading = |text: &str, y: i32| {
-            create(w!("STATIC"), text, 0, WINDOW_EX_STYLE::default(), label_x, y, ctl_w, row_h, -1, self.heading_font);
+        let p = &self.palette;
+
+        let heading = |text: &str, x: i32, y: i32| {
+            self.create(w!("STATIC"), text, 0, Default::default(), (x, y, col_w, row_h), -1, self.heading_font);
         };
-        let label = |text: &str, y: i32| {
-            create(
-                w!("STATIC"),
-                text,
-                0,
-                WINDOW_EX_STYLE::default(),
-                label_x,
-                y + s(4),
-                ctl_x - label_x,
-                row_h,
-                -1,
-                font,
-            );
+        let label = |text: &str, x: i32, y: i32| {
+            self.create(w!("STATIC"), text, 0, Default::default(), (x, y + s(4), label_w, row_h), -1, font);
         };
-        let combo = |id: i32, y: i32, w: i32, items: &[String], selected: usize| {
-            let ctl = create(
-                w!("COMBOBOX"),
-                "",
-                (CBS_DROPDOWNLIST | WS_VSCROLL.0 as i32 | WS_TABSTOP.0 as i32) as u32,
-                WINDOW_EX_STYLE::default(),
-                ctl_x,
-                y,
-                w,
-                s(300),
-                id,
-                font,
-            );
+        let static_text = |id: i32, text: &str, rect: (i32, i32, i32, i32)| {
+            self.create(w!("STATIC"), text, 0, Default::default(), rect, id, font);
+        };
+        let edit = |id: i32, text: &str, style: u32, rect: (i32, i32, i32, i32)| {
+            let ctl = self.create(w!("EDIT"), text, style | tab, WS_EX_CLIENTEDGE, rect, id, font);
+            let multiline = style & ES_MULTILINE as u32 != 0;
+            p.apply_to_control(ctl, if multiline { w!("DarkMode_Explorer") } else { w!("DarkMode_CFD") });
+            ctl
+        };
+        let button = |id: i32, text: &str, style: i32, rect: (i32, i32, i32, i32)| {
+            let ctl = self.create(w!("BUTTON"), text, (style | tab as i32) as u32, Default::default(), rect, id, font);
+            p.apply_to_control(ctl, w!("DarkMode_Explorer"));
+        };
+        let checkbox = |id: i32, text: &str, x: i32, y: i32, w: i32, on: bool| {
+            button(id, text, BS_AUTOCHECKBOX, (x, y, w, row_h));
+            send(self.hwnd, id, BM_SETCHECK, on as usize, 0);
+        };
+        let combo = |id: i32, x: i32, y: i32, items: &[String], selected: usize| {
+            let style = (CBS_DROPDOWNLIST | WS_VSCROLL.0 as i32) as u32 | tab;
+            let ctl = self.create(w!("COMBOBOX"), "", style, Default::default(), (x, y, ctl_w, s(300)), id, font);
             for it in items {
                 let t = wide(it);
                 unsafe { SendMessageW(ctl, CB_ADDSTRING, None, Some(LPARAM(t.as_ptr() as isize))) };
             }
             unsafe { SendMessageW(ctl, CB_SETCURSEL, Some(WPARAM(selected)), None) };
+            p.apply_to_control(ctl, w!("DarkMode_CFD"));
+            let mut info = COMBOBOXINFO { cbSize: size_of::<COMBOBOXINFO>() as u32, ..Default::default() };
+            if unsafe { GetComboBoxInfo(ctl, &mut info) }.is_ok() {
+                p.apply_to_control(info.hwndList, w!("DarkMode_Explorer"));
+            }
         };
-        let checkbox = |id: i32, text: &str, x: i32, y: i32, w: i32, on: bool| {
-            let ctl = create(
-                w!("BUTTON"),
-                text,
-                (BS_AUTOCHECKBOX | WS_TABSTOP.0 as i32) as u32,
-                WINDOW_EX_STYLE::default(),
-                x,
-                y,
-                w,
-                row_h,
-                id,
-                font,
-            );
-            unsafe { SendMessageW(ctl, BM_SETCHECK, Some(WPARAM(on as usize)), None) };
+        let hotkey = |id: i32, x: i32, y: i32, modifiers: u32, key: u32| {
+            let ctl = edit(id, "", ES_AUTOHSCROLL as u32, (x, y, ctl_w, row_h));
+            hotkey_box::attach(ctl, modifiers, key);
         };
         let cfg = &self.cfg;
 
-        // --- Recording
-        heading("Recording", y);
+        // --- Left column: recording and general
+        let x = margin;
+        let cx = x + label_w;
+        let mut y = s(14);
+        heading("Recording", x, y);
         y += row;
-        label("Save clip hotkey", y);
-        let hk =
-            create(w!("msctls_hotkey32"), "", WS_TABSTOP.0, WS_EX_CLIENTEDGE, ctl_x, y, ctl_w, row_h, ID_HOTKEY, font);
-        unsafe {
-            let mut f = 0;
-            if cfg.hotkey_modifiers & MOD_ALT.0 != 0 {
-                f |= HOTKEYF_ALT;
-            }
-            if cfg.hotkey_modifiers & MOD_CONTROL.0 != 0 {
-                f |= HOTKEYF_CONTROL;
-            }
-            if cfg.hotkey_modifiers & MOD_SHIFT.0 != 0 {
-                f |= HOTKEYF_SHIFT;
-            }
-            SendMessageW(hk, HKM_SETHOTKEY, Some(WPARAM((cfg.hotkey_key | f << 8) as usize)), None);
-        }
+        label("Save clip hotkey", x, y);
+        hotkey(ID_HOTKEY, cx, y, cfg.hotkey_modifiers, cfg.hotkey_key);
+        y += row;
+        label("Record hotkey", x, y);
+        hotkey(ID_RECORD_HOTKEY, cx, y, cfg.record_hotkey_modifiers, cfg.record_hotkey_key);
         y += row;
 
-        label("Replay length", y);
+        label("Replay length", x, y);
         let lengths: Vec<String> = LENGTHS.iter().map(|l| l.1.to_string()).collect();
         let sel = LENGTHS.iter().position(|l| l.0 >= cfg.replay_seconds).unwrap_or(2);
-        combo(ID_LENGTH, y, ctl_w, &lengths, sel);
+        combo(ID_LENGTH, cx, y, &lengths, sel);
         y += row;
 
-        label("Display", y);
+        label("Display", x, y);
         let monitors: Vec<String> =
             self.monitors.iter().map(|m| format!("{} - {}x{}", m.name, m.width, m.height)).collect();
-        combo(ID_MONITOR, y, ctl_w, &monitors, (cfg.monitor as usize).min(monitors.len().saturating_sub(1)));
+        combo(ID_MONITOR, cx, y, &monitors, (cfg.monitor as usize).min(monitors.len().saturating_sub(1)));
         y += row;
 
-        label("Resolution", y);
+        label("Resolution", x, y);
         let res: Vec<String> = RESOLUTIONS.iter().map(|r| r.1.to_string()).collect();
         let sel = RESOLUTIONS.iter().position(|r| r.0 == cfg.resolution).unwrap_or(0);
-        combo(ID_RESOLUTION, y, ctl_w, &res, sel);
+        combo(ID_RESOLUTION, cx, y, &res, sel);
         y += row;
 
-        label("Frame rate", y);
+        label("Frame rate", x, y);
         let rates: Vec<String> = FRAME_RATES.iter().map(|r| format!("{r} fps")).collect();
         let sel = FRAME_RATES.iter().position(|&r| r >= cfg.fps).unwrap_or(1);
-        combo(ID_FPS, y, ctl_w, &rates, sel);
+        combo(ID_FPS, cx, y, &rates, sel);
         y += row;
 
-        label("Bitrate (Mbps)", y);
-        create(
-            w!("EDIT"),
-            &cfg.bitrate_mbps.to_string(),
-            (ES_NUMBER | ES_AUTOHSCROLL | WS_TABSTOP.0 as i32) as u32,
-            WS_EX_CLIENTEDGE,
-            ctl_x,
-            y,
-            s(60),
-            row_h,
-            ID_BITRATE,
-            font,
-        );
-        create(
-            w!("STATIC"),
-            "",
-            0,
-            WINDOW_EX_STYLE::default(),
-            ctl_x + s(72),
-            y + s(4),
-            ctl_w - s(72),
-            row_h,
-            ID_MEMORY,
-            font,
-        );
+        label("Bitrate (Mbps)", x, y);
+        edit(ID_BITRATE, &cfg.bitrate_mbps.to_string(), (ES_NUMBER | ES_AUTOHSCROLL) as u32, (cx, y, s(60), row_h));
+        static_text(ID_MEMORY, "", (cx + s(72), y + s(4), ctl_w - s(72), row_h));
         y += row;
-        checkbox(ID_CURSOR, "Record the mouse cursor", label_x, y, width - 2 * label_x, cfg.capture_cursor);
+        checkbox(ID_CURSOR, "Record the mouse cursor", x, y, col_w, cfg.capture_cursor);
+        y += row;
+        checkbox(ID_STRETCH, "Keep stretched resolutions stretched", x, y, col_w, cfg.keep_stretched);
         y += row + s(10);
 
-        // --- Audio
-        heading("Audio", y);
+        heading("General", x, y);
         y += row;
-        checkbox(ID_SYSTEM_AUDIO, "Record system audio", label_x, y, ctl_w, cfg.system_audio);
+        label("Save clips to", x, y);
+        edit(ID_FOLDER, &cfg.save_folder, ES_AUTOHSCROLL as u32, (cx, y, ctl_w - s(84), row_h));
+        button(ID_BROWSE, "Browse...", BS_PUSHBUTTON, (cx + ctl_w - s(76), y - s(1), s(76), row_h + s(2)));
         y += row;
-        checkbox(ID_MIC, "Record microphone", label_x, y, ctl_x - label_x, cfg.microphone);
+        label("Theme", x, y);
+        let themes: Vec<String> = THEMES.iter().map(|t| t.to_string()).collect();
+        combo(ID_THEME, cx, y, &themes, Theme::ALL.iter().position(|&t| t == cfg.theme).unwrap_or(0));
+        y += row;
+        checkbox(ID_AUTOSTART, "Start with Windows", x, y, col_w, cfg.start_with_windows);
+        y += row;
+        let left_bottom = y;
+
+        // --- Right column: audio and what happens on save
+        let x = margin + col_w + s(36);
+        let cx = x + label_w;
+        let mut y = s(14);
+        heading("Audio", x, y);
+        y += row;
+        checkbox(ID_SYSTEM_AUDIO, "System audio", x, y, label_w - s(8), cfg.system_audio);
+        let mut outputs = vec!["Default output".to_string()];
+        outputs.extend(self.outputs.iter().map(|d| d.name.clone()));
+        let sel = self.outputs.iter().position(|d| d.id == cfg.system_audio_device).map_or(0, |i| i + 1);
+        combo(ID_SYSTEM_DEVICE, cx, y, &outputs, sel);
+        y += row;
+        checkbox(ID_MIC, "Microphone", x, y, label_w - s(8), cfg.microphone);
         let mut mics = vec!["Default microphone".to_string()];
         mics.extend(self.mics.iter().map(|m| m.name.clone()));
         let sel = self.mics.iter().position(|m| m.id == cfg.microphone_device).map_or(0, |i| i + 1);
-        combo(ID_MIC_DEVICE, y, ctl_w, &mics, sel);
+        combo(ID_MIC_DEVICE, cx, y, &mics, sel);
         y += row;
-        label("Mic volume (%)", y);
-        create(
-            w!("EDIT"),
-            &cfg.microphone_volume.to_string(),
-            (ES_NUMBER | ES_AUTOHSCROLL | WS_TABSTOP.0 as i32) as u32,
-            WS_EX_CLIENTEDGE,
-            ctl_x,
-            y,
-            s(60),
-            row_h,
-            ID_MIC_VOLUME,
-            font,
-        );
-        y += row + s(10);
+        label("Mic volume (%)", x, y);
+        edit(ID_MIC_VOLUME, &cfg.microphone_volume.to_string(), (ES_NUMBER | ES_AUTOHSCROLL) as u32, (cx, y, s(60), row_h));
+        y += row;
+        checkbox(ID_SEPARATE, "Save each source on its own track too", x, y, col_w, cfg.separate_audio_tracks);
+        y += row;
+        label("App tracks", x, y);
+        button(ID_ADD_APP, "Add app...", BS_PUSHBUTTON, (x, y + row, s(96), row_h + s(2)));
+        let tracks = cfg.app_tracks.join("\r\n");
+        let style = (ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN) as u32 | WS_VSCROLL.0;
+        edit(ID_APP_TRACKS, &tracks, style, (cx, y, ctl_w, 3 * row - s(8)));
+        y += 3 * row - s(4);
+        let hint = if audio::app_capture_supported() {
+            "One per line, like \"Discord: discord.exe\". Track 1 always has everything."
+        } else {
+            "App tracks need Windows 11."
+        };
+        static_text(ID_APP_HINT, hint, (cx, y, ctl_w, 2 * row_h));
+        y += 2 * row_h + s(6);
 
-        // --- General
-        heading("General", y);
+        heading("When a clip is saved", x, y);
         y += row;
-        label("Save clips to", y);
-        create(
-            w!("EDIT"),
-            &cfg.save_folder,
-            (ES_AUTOHSCROLL | WS_TABSTOP.0 as i32) as u32,
-            WS_EX_CLIENTEDGE,
-            ctl_x,
-            y,
-            ctl_w - s(84),
-            row_h,
-            ID_FOLDER,
-            font,
-        );
-        create(
-            w!("BUTTON"),
-            "Browse...",
-            (BS_PUSHBUTTON | WS_TABSTOP.0 as i32) as u32,
-            WINDOW_EX_STYLE::default(),
-            ctl_x + ctl_w - s(76),
-            y - s(1),
-            s(76),
-            row_h + s(2),
-            ID_BROWSE,
-            font,
-        );
+        checkbox(ID_SOUND, "Play a sound", x, y, col_w, cfg.save_sound);
         y += row;
-        checkbox(ID_SOUND, "Play a sound when a clip is saved", label_x, y, width - 2 * label_x, cfg.save_sound);
+        label("Sound file", x, y);
+        let sound = edit(ID_SOUND_FILE, &cfg.save_sound_file, ES_AUTOHSCROLL as u32, (cx, y, ctl_w - s(84), row_h));
+        let cue = wide("Built-in chime");
+        unsafe { SendMessageW(sound, EM_SETCUEBANNER, Some(WPARAM(1)), Some(LPARAM(cue.as_ptr() as isize))) };
+        button(ID_BROWSE_SOUND, "Browse...", BS_PUSHBUTTON, (cx + ctl_w - s(76), y - s(1), s(76), row_h + s(2)));
         y += row;
-        checkbox(ID_AUTOSTART, "Start with Windows", label_x, y, width - 2 * label_x, cfg.start_with_windows);
-        y += row + s(14);
+        checkbox(ID_NOTIFY, "Show a notification", x, y, col_w, cfg.notifications);
+        y += row;
 
         // --- Buttons (IDOK/IDCANCEL so Enter and Esc work via IsDialogMessage)
+        let mut y = y.max(left_bottom) + s(14);
         let (bw, bh) = (s(88), s(28));
-        create(
-            w!("BUTTON"),
-            "Save",
-            (BS_DEFPUSHBUTTON | WS_TABSTOP.0 as i32) as u32,
-            WINDOW_EX_STYLE::default(),
-            width - s(20) - 2 * bw - s(8),
-            y,
-            bw,
-            bh,
-            IDOK.0,
-            font,
-        );
-        create(
-            w!("BUTTON"),
-            "Cancel",
-            (BS_PUSHBUTTON | WS_TABSTOP.0 as i32) as u32,
-            WINDOW_EX_STYLE::default(),
-            width - s(20) - bw,
-            y,
-            bw,
-            bh,
-            IDCANCEL.0,
-            font,
-        );
+        button(IDOK.0, "Save", BS_DEFPUSHBUTTON, (width - margin - 2 * bw - s(8), y, bw, bh));
+        button(IDCANCEL.0, "Cancel", BS_PUSHBUTTON, (width - margin - bw, y, bw, bh));
         y += bh + s(16);
 
         self.update_dependent();
@@ -425,28 +418,20 @@ impl Settings {
         let h = self.hwnd;
         let mut cfg = self.cfg.clone();
 
-        let hk = send(h, ID_HOTKEY, HKM_GETHOTKEY, 0, 0) as u32;
-        let (vk, f) = (hk & 0xff, (hk >> 8) & 0xff);
-        if vk != 0 {
-            cfg.hotkey_key = vk;
-            cfg.hotkey_modifiers = 0;
-            if f & HOTKEYF_ALT != 0 {
-                cfg.hotkey_modifiers |= MOD_ALT.0;
-            }
-            if f & HOTKEYF_CONTROL != 0 {
-                cfg.hotkey_modifiers |= MOD_CONTROL.0;
-            }
-            if f & HOTKEYF_SHIFT != 0 {
-                cfg.hotkey_modifiers |= MOD_SHIFT.0;
-            }
-        }
+        (cfg.hotkey_modifiers, cfg.hotkey_key) = hotkey_box::value(item(h, ID_HOTKEY));
+        (cfg.record_hotkey_modifiers, cfg.record_hotkey_key) = hotkey_box::value(item(h, ID_RECORD_HOTKEY));
         cfg.replay_seconds = LENGTHS[combo_index(h, ID_LENGTH).min(LENGTHS.len() - 1)].0;
         cfg.monitor = combo_index(h, ID_MONITOR) as u32;
         cfg.resolution = RESOLUTIONS[combo_index(h, ID_RESOLUTION).min(RESOLUTIONS.len() - 1)].0;
         cfg.fps = FRAME_RATES[combo_index(h, ID_FPS).min(FRAME_RATES.len() - 1)];
         cfg.bitrate_mbps = window_text(item(h, ID_BITRATE)).parse::<u32>().unwrap_or(cfg.bitrate_mbps).clamp(1, 150);
         cfg.capture_cursor = checked(h, ID_CURSOR);
+        cfg.keep_stretched = checked(h, ID_STRETCH);
         cfg.system_audio = checked(h, ID_SYSTEM_AUDIO);
+        cfg.system_audio_device = match combo_index(h, ID_SYSTEM_DEVICE) {
+            0 => String::new(),
+            i => self.outputs.get(i - 1).map(|d| d.id.clone()).unwrap_or_default(),
+        };
         cfg.microphone = checked(h, ID_MIC);
         cfg.microphone_device = match combo_index(h, ID_MIC_DEVICE) {
             0 => String::new(),
@@ -454,38 +439,59 @@ impl Settings {
         };
         cfg.microphone_volume =
             window_text(item(h, ID_MIC_VOLUME)).parse::<u32>().unwrap_or(cfg.microphone_volume).min(400);
+        cfg.separate_audio_tracks = checked(h, ID_SEPARATE);
+        cfg.app_tracks =
+            window_text(item(h, ID_APP_TRACKS)).lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect();
         let folder = window_text(item(h, ID_FOLDER));
         if !folder.trim().is_empty() {
             cfg.save_folder = folder.trim().to_string();
         }
         cfg.save_sound = checked(h, ID_SOUND);
+        cfg.save_sound_file = window_text(item(h, ID_SOUND_FILE)).trim().to_string();
+        cfg.notifications = checked(h, ID_NOTIFY);
+        cfg.theme = Theme::ALL[combo_index(h, ID_THEME).min(Theme::ALL.len() - 1)];
         cfg.start_with_windows = checked(h, ID_AUTOSTART);
         cfg
     }
 
-    /// Refresh the RAM estimate and enable/disable mic controls.
+    /// Refresh the RAM estimate and enable/disable controls that depend on
+    /// checkboxes.
     fn update_dependent(&self) {
+        let h = self.hwnd;
         let cfg = self.read();
-        let text = wide(&format!("uses ~{} MB of RAM", cfg.estimated_memory_mb()));
-        unsafe {
-            let _ = SetWindowTextW(item(self.hwnd, ID_MEMORY), PCWSTR(text.as_ptr()));
-            let _ = EnableWindow(item(self.hwnd, ID_MIC_DEVICE), cfg.microphone);
-            let _ = EnableWindow(item(self.hwnd, ID_MIC_VOLUME), cfg.microphone);
+        set_text(item(h, ID_MEMORY), &format!("uses ~{} MB of RAM", cfg.estimated_memory_mb()));
+        let apps = cfg.separate_audio_tracks && audio::app_capture_supported();
+        let enable = [
+            (ID_SYSTEM_DEVICE, cfg.system_audio),
+            (ID_MIC_DEVICE, cfg.microphone),
+            (ID_MIC_VOLUME, cfg.microphone),
+            (ID_APP_TRACKS, apps),
+            (ID_ADD_APP, apps),
+            (ID_APP_HINT, apps),
+            (ID_SOUND_FILE, cfg.save_sound),
+            (ID_BROWSE_SOUND, cfg.save_sound),
+        ];
+        for (id, on) in enable {
+            unsafe {
+                let _ = EnableWindow(item(h, id), on);
+            }
         }
     }
 }
 
-fn browse_folder(owner: HWND, current: &str) -> Option<String> {
+/// A file or folder picker. Returns the chosen path.
+fn browse(owner: HWND, current: &str, folders: bool) -> Option<String> {
     unsafe {
         let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
         let opts = dialog.GetOptions().ok()?;
-        dialog.SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM).ok()?;
-        if let Ok(item) = windows::Win32::UI::Shell::SHCreateItemFromParsingName::<
-            _,
-            _,
-            windows::Win32::UI::Shell::IShellItem,
-        >(PCWSTR(wide(current).as_ptr()), None)
-        {
+        let kind = if folders { FOS_PICKFOLDERS } else { FOS_FILEMUSTEXIST };
+        dialog.SetOptions(opts | kind | FOS_FORCEFILESYSTEM).ok()?;
+        if !folders {
+            let filter = [COMDLG_FILTERSPEC { pszName: w!("Sounds (*.wav)"), pszSpec: w!("*.wav") }];
+            let _ = dialog.SetFileTypes(&filter);
+        }
+        let start = if folders { current } else { current.rsplit_once('\\').map_or("", |(dir, _)| dir) };
+        if let Ok(item) = SHCreateItemFromParsingName::<_, _, IShellItem>(PCWSTR(wide(start).as_ptr()), None) {
             let _ = dialog.SetFolder(&item);
         }
         dialog.Show(Some(owner)).ok()?;
@@ -495,6 +501,108 @@ fn browse_folder(owner: HWND, current: &str) -> Option<String> {
         CoTaskMemFree(Some(path.0 as _));
         s
     }
+}
+
+/// Pop up the apps currently playing audio under the "Add app..." button and
+/// add the chosen one to the app track list.
+fn add_app(hwnd: HWND) {
+    let apps = audio::apps_with_audio();
+    unsafe {
+        let Ok(menu) = CreatePopupMenu() else { return };
+        if apps.is_empty() {
+            let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, w!("No apps are playing sound right now"));
+        }
+        for (i, exe) in apps.iter().enumerate() {
+            let t = wide(exe);
+            let _ = AppendMenuW(menu, MF_STRING, i + 1, PCWSTR(t.as_ptr()));
+        }
+        let mut r = RECT::default();
+        let _ = GetWindowRect(item(hwnd, ID_ADD_APP), &mut r);
+        let cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, r.left, r.bottom, None, hwnd, None);
+        let _ = DestroyMenu(menu);
+        let Some(exe) = apps.get((cmd.0 as usize).wrapping_sub(1)) else { return };
+        let list = item(hwnd, ID_APP_TRACKS);
+        let mut text = window_text(list).trim_end().to_string();
+        if !text.is_empty() {
+            text.push_str("\r\n");
+        }
+        text.push_str(&format!("{}: {exe}", crate::rt::path::file_stem(exe)));
+        set_text(list, &text);
+    }
+}
+
+/// Checkboxes ignore the text colour they're given, so in dark mode they're
+/// drawn here: the themed box, then the label in the palette's colours.
+fn draw_checkbox(nm: &NMCUSTOMDRAW, p: &Palette, font: HFONT) -> LRESULT {
+    unsafe {
+        let (ctl, hdc, rc) = (nm.hdr.hwndFrom, nm.hdc, nm.rc);
+        FillRect(hdc, &rc, p.background);
+        let state = nm.uItemState;
+        let on = SendMessageW(ctl, BM_GETCHECK, None, None).0 == BST_CHECKED.0 as isize;
+        let disabled = state.0 & CDIS_DISABLED.0 != 0;
+        let look = if disabled {
+            3
+        } else if state.0 & CDIS_SELECTED.0 != 0 {
+            2
+        } else if state.0 & CDIS_HOT.0 != 0 {
+            1
+        } else {
+            0
+        };
+        let part_state = if on { CBS_CHECKEDNORMAL.0 } else { CBS_UNCHECKEDNORMAL.0 } + look;
+
+        let theme = OpenThemeData(Some(ctl), w!("Button"));
+        let dpi = GetDpiForWindow(ctl) as i32;
+        let size = GetThemePartSize(theme, Some(hdc), BP_CHECKBOX.0, part_state, None, TS_DRAW)
+            .unwrap_or(SIZE { cx: 13 * dpi / 96, cy: 13 * dpi / 96 });
+        let top = rc.top + (rc.bottom - rc.top - size.cy) / 2;
+        let glyph = RECT { left: rc.left, top, right: rc.left + size.cx, bottom: top + size.cy };
+        let _ = DrawThemeBackground(theme, hdc, BP_CHECKBOX.0, part_state, &glyph, None);
+        let _ = CloseThemeData(theme);
+
+        let mut text: Vec<u16> = window_text(ctl).encode_utf16().collect();
+        let mut text_rect = RECT { left: glyph.right + 5 * dpi / 96, ..rc };
+        let old_font = SelectObject(hdc, font.into());
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, if disabled { p.dim_text } else { p.text });
+        DrawTextW(hdc, &mut text, &mut text_rect, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+        if state.0 & CDIS_FOCUS.0 != 0 && state.0 & CDIS_SHOWKEYBOARDCUES.0 != 0 {
+            let mut focus = text_rect;
+            DrawTextW(hdc, &mut text, &mut focus, DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
+            let h = focus.bottom - focus.top;
+            focus.top = rc.top + (rc.bottom - rc.top - h) / 2 - 1;
+            focus.bottom = focus.top + h + 2;
+            focus.left -= 1;
+            focus.right += 1;
+            let _ = DrawFocusRect(hdc, &focus);
+        }
+        SelectObject(hdc, old_font);
+        LRESULT(CDRF_SKIPDEFAULT as isize)
+    }
+}
+
+/// Colours for static and edit controls: the palette, with dimmed text for
+/// hints and disabled controls.
+fn control_colors(msg: u32, hdc: HDC, ctl: HWND) -> Option<LRESULT> {
+    STATE.with(|s| {
+        let s = s.try_borrow().ok()?;
+        let s = s.as_ref()?;
+        let p = &s.palette;
+        let id = unsafe { GetDlgCtrlID(ctl) };
+        let field = msg != WM_CTLCOLORSTATIC || FIELDS.contains(&id);
+        if !p.dark && field {
+            return None; // the system's own look
+        }
+        let dim = matches!(id, ID_MEMORY | ID_APP_HINT) || !unsafe { IsWindowEnabled(ctl) }.as_bool();
+        unsafe {
+            SetTextColor(hdc, if dim { p.dim_text } else { p.text });
+            SetBkColor(hdc, if field { p.field_color } else { p.background_color });
+            if !field {
+                SetBkMode(hdc, TRANSPARENT);
+            }
+        }
+        Some(LRESULT(if field { p.field.0 } else { p.background.0 } as isize))
+    })
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -515,17 +623,22 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 x if x == IDCANCEL.0 => unsafe {
                     let _ = DestroyWindow(hwnd);
                 },
+                // Modal dialogs and menus below: no STATE borrow held.
                 ID_BROWSE => {
-                    let current = window_text(item(hwnd, ID_FOLDER));
-                    // Modal dialog: no STATE borrow held here.
-                    if let Some(path) = browse_folder(hwnd, &current) {
-                        let t = wide(&path);
-                        unsafe {
-                            let _ = SetWindowTextW(item(hwnd, ID_FOLDER), PCWSTR(t.as_ptr()));
-                        }
+                    if let Some(path) = browse(hwnd, &window_text(item(hwnd, ID_FOLDER)), true) {
+                        set_text(item(hwnd, ID_FOLDER), &path);
                     }
                 }
-                ID_BITRATE | ID_LENGTH | ID_MIC if matches!(code, EN_CHANGE | CBN_SELCHANGE | BN_CLICKED) => {
+                ID_BROWSE_SOUND => {
+                    if let Some(path) = browse(hwnd, &window_text(item(hwnd, ID_SOUND_FILE)), false) {
+                        set_text(item(hwnd, ID_SOUND_FILE), &path);
+                        crate::util::play_saved_sound(&path); // a preview
+                    }
+                }
+                ID_ADD_APP => add_app(hwnd),
+                ID_BITRATE | ID_LENGTH | ID_SYSTEM_AUDIO | ID_MIC | ID_SEPARATE | ID_APP_TRACKS | ID_SOUND
+                    if matches!(code, EN_CHANGE | CBN_SELCHANGE | BN_CLICKED) =>
+                {
                     STATE.with(|s| {
                         if let Ok(s) = s.try_borrow() {
                             if let Some(s) = s.as_ref() {
@@ -538,13 +651,36 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             LRESULT(0)
         }
-        WM_CTLCOLORSTATIC => unsafe {
-            // Make labels and checkboxes blend with the window background.
-            let hdc = HDC(wparam.0 as _);
-            SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, COLORREF(GetSysColor(COLOR_WINDOWTEXT)));
-            LRESULT(GetSysColorBrush(COLOR_WINDOW).0 as isize)
-        },
+        WM_NOTIFY => {
+            let nm = unsafe { &*(lparam.0 as *const NMCUSTOMDRAW) };
+            if nm.hdr.code == NM_CUSTOMDRAW && nm.dwDrawStage == CDDS_PREPAINT {
+                let style = unsafe { GetWindowLongW(nm.hdr.hwndFrom, GWL_STYLE) } as u32;
+                let is_checkbox = style & BS_TYPEMASK as u32 == BS_AUTOCHECKBOX as u32;
+                let drawn = STATE.with(|s| {
+                    let s = s.try_borrow().ok()?;
+                    let s = s.as_ref().filter(|s| s.palette.dark && is_checkbox)?;
+                    Some(draw_checkbox(nm, &s.palette, s.font))
+                });
+                if let Some(r) = drawn {
+                    return r;
+                }
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+        WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
+            control_colors(msg, HDC(wparam.0 as _), HWND(lparam.0 as _))
+                .unwrap_or_else(|| unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) })
+        }
+        WM_ERASEBKGND => {
+            let brush = STATE.with(|s| s.try_borrow().ok().and_then(|s| s.as_ref().map(|s| s.palette.background)));
+            let Some(brush) = brush else { return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) } };
+            unsafe {
+                let mut rc = RECT::default();
+                let _ = GetClientRect(hwnd, &mut rc);
+                FillRect(HDC(wparam.0 as _), &rc, brush);
+            }
+            LRESULT(1)
+        }
         WM_DESTROY => {
             if let Some(s) = STATE.with(|s| s.borrow_mut().take()) {
                 unsafe {
@@ -555,5 +691,116 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+/// An edit box that records a key combination instead of text. Unlike the
+/// stock hotkey control it takes the Windows key, can be cleared (Backspace
+/// or Delete) and follows the dark theme. The combination lives in the
+/// window's user data as `modifiers << 16 | key`.
+mod hotkey_box {
+    use super::*;
+
+    const SUBCLASS_ID: usize = 1;
+
+    pub fn attach(ctl: HWND, modifiers: u32, key: u32) {
+        unsafe {
+            let _ = SetWindowSubclass(ctl, Some(proc), SUBCLASS_ID, 0);
+        }
+        set(ctl, modifiers, key);
+    }
+
+    pub fn value(ctl: HWND) -> (u32, u32) {
+        let v = unsafe { GetWindowLongPtrW(ctl, GWLP_USERDATA) } as u32;
+        (v >> 16, v & 0xffff)
+    }
+
+    fn set(ctl: HWND, modifiers: u32, key: u32) {
+        unsafe { SetWindowLongPtrW(ctl, GWLP_USERDATA, (modifiers << 16 | key) as isize) };
+        show(ctl, &hotkey_name(modifiers, key));
+    }
+
+    fn show(ctl: HWND, text: &str) {
+        set_text(ctl, text);
+        unsafe {
+            SendMessageW(ctl, EM_SETSEL, Some(WPARAM(usize::MAX)), Some(LPARAM(-1)));
+        }
+    }
+
+    fn held_modifiers() -> u32 {
+        let down = |vk: u16| unsafe { GetKeyState(vk as i32) } < 0;
+        let mut m = 0;
+        if down(VK_CONTROL.0) {
+            m |= MOD_CONTROL.0;
+        }
+        if down(VK_MENU.0) {
+            m |= MOD_ALT.0;
+        }
+        if down(VK_SHIFT.0) {
+            m |= MOD_SHIFT.0;
+        }
+        if down(VK_LWIN.0) || down(VK_RWIN.0) {
+            m |= MOD_WIN.0;
+        }
+        m
+    }
+
+    fn is_modifier(vk: u16) -> bool {
+        [VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN, VK_LCONTROL, VK_RCONTROL, VK_LMENU, VK_RMENU, VK_LSHIFT, VK_RSHIFT]
+            .iter()
+            .any(|k| k.0 == vk)
+    }
+
+    unsafe extern "system" fn proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _id: usize,
+        _data: usize,
+    ) -> LRESULT {
+        let vk = wparam.0 as u16;
+        match msg {
+            WM_GETDLGCODE => {
+                // Tab, Esc and Enter still belong to the window; every other key is ours.
+                let m = lparam.0 as *const MSG;
+                let key = (!m.is_null()).then(|| unsafe { &*m }).filter(|m| m.message == WM_KEYDOWN);
+                if key.is_some_and(|m| [VK_TAB, VK_ESCAPE, VK_RETURN].iter().any(|k| m.wParam.0 as u16 == k.0)) {
+                    return unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };
+                }
+                LRESULT((DLGC_WANTALLKEYS | DLGC_WANTCHARS) as isize)
+            }
+            WM_KEYDOWN | WM_SYSKEYDOWN => {
+                let modifiers = held_modifiers();
+                if is_modifier(vk) {
+                    // Show what's held so far, e.g. "Ctrl+Alt+".
+                    let partial = hotkey_name(modifiers, 0x41);
+                    show(hwnd, &partial[..partial.len() - 1]);
+                } else if modifiers == 0 && (vk == VK_BACK.0 || vk == VK_DELETE.0) {
+                    set(hwnd, 0, 0);
+                } else {
+                    set(hwnd, modifiers, vk as u32);
+                }
+                LRESULT(0)
+            }
+            WM_KEYUP | WM_SYSKEYUP => {
+                if vk == VK_SNAPSHOT.0 {
+                    // Print Screen only ever arrives as a key-up.
+                    set(hwnd, held_modifiers(), vk as u32);
+                } else if is_modifier(vk) && held_modifiers() == 0 {
+                    let (m, k) = value(hwnd);
+                    set(hwnd, m, k);
+                }
+                LRESULT(0)
+            }
+            WM_CHAR | WM_SYSCHAR | WM_DEADCHAR | WM_SYSDEADCHAR | WM_PASTE | WM_CUT | WM_CLEAR | WM_CONTEXTMENU => {
+                LRESULT(0)
+            }
+            WM_NCDESTROY => unsafe {
+                let _ = RemoveWindowSubclass(hwnd, Some(proc), SUBCLASS_ID);
+                DefSubclassProc(hwnd, msg, wparam, lparam)
+            },
+            _ => unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) },
+        }
     }
 }

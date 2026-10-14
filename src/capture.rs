@@ -10,7 +10,14 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::rt::Mutex;
 
+use windows::Win32::Devices::Display::{
+    DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_PREFERRED_MODE,
+    DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME,
+    DISPLAYCONFIG_TARGET_PREFERRED_MODE, DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QDC_ONLY_ACTIVE_PATHS,
+    QueryDisplayConfig,
+};
 use windows::Win32::Foundation::{E_ACCESSDENIED, HMODULE, LUID, RECT};
+use windows::Win32::Graphics::Gdi::{DEVMODEW, ENUM_REGISTRY_SETTINGS, EnumDisplaySettingsW};
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1};
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
@@ -19,7 +26,7 @@ use windows::Win32::System::Threading::{
     CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, INFINITE, SetWaitableTimer, TIMER_ALL_ACCESS,
     WaitForSingleObject,
 };
-use windows::core::{Interface, Result};
+use windows::core::{Interface, PCWSTR, Result};
 
 use crate::clock::{self, SECOND};
 use crate::cursor::CursorOverlay;
@@ -36,6 +43,9 @@ pub struct VideoConfig {
     pub height: u32,
     /// Draw the mouse cursor into the video.
     pub cursor: bool,
+    /// Record at the desktop size and the panel's shape when a game switches
+    /// the display to another mode (see `stretched_size`).
+    pub keep_stretched: bool,
 }
 
 pub struct MonitorInfo {
@@ -82,6 +92,83 @@ pub fn list_monitors() -> Vec<MonitorInfo> {
             })
         })
         .collect()
+}
+
+/// The size the screen's panel natively runs at, which is what a stretched
+/// resolution fills. `gdi_name` is the output's device name (\\.\DISPLAY1).
+fn panel_size(gdi_name: &[u16; 32]) -> Option<(u32, u32)> {
+    unsafe {
+        let (mut path_count, mut mode_count) = (0u32, 0u32);
+        GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut path_count, &mut mode_count).ok().ok()?;
+        let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); path_count as usize];
+        let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); mode_count as usize];
+        QueryDisplayConfig(
+            QDC_ONLY_ACTIVE_PATHS,
+            &mut path_count,
+            paths.as_mut_ptr(),
+            &mut mode_count,
+            modes.as_mut_ptr(),
+            None,
+        )
+        .ok()
+        .ok()?;
+        for path in &paths[..path_count as usize] {
+            let mut source = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
+                header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                    r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+                    size: size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
+                    adapterId: path.sourceInfo.adapterId,
+                    id: path.sourceInfo.id,
+                },
+                ..Default::default()
+            };
+            if DisplayConfigGetDeviceInfo(&mut source.header) != 0 || source.viewGdiDeviceName != *gdi_name {
+                continue;
+            }
+            let mut preferred = DISPLAYCONFIG_TARGET_PREFERRED_MODE {
+                header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                    r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_PREFERRED_MODE,
+                    size: size_of::<DISPLAYCONFIG_TARGET_PREFERRED_MODE>() as u32,
+                    adapterId: path.targetInfo.adapterId,
+                    id: path.targetInfo.id,
+                },
+                ..Default::default()
+            };
+            if DisplayConfigGetDeviceInfo(&mut preferred.header) != 0 || preferred.width == 0 || preferred.height == 0 {
+                return None;
+            }
+            return Some((preferred.width, preferred.height));
+        }
+        None
+    }
+}
+
+/// The resolution set in Windows' display settings. Fullscreen games change
+/// the mode only temporarily, so this stays at the desktop resolution.
+fn desktop_size(gdi_name: &[u16; 32]) -> Option<(u32, u32)> {
+    let mut mode = DEVMODEW { dmSize: size_of::<DEVMODEW>() as u16, ..Default::default() };
+    let ok = unsafe { EnumDisplaySettingsW(PCWSTR(gdi_name.as_ptr()), ENUM_REGISTRY_SETTINGS, &mut mode) };
+    (ok.as_bool() && mode.dmPelsWidth > 0 && mode.dmPelsHeight > 0).then_some((mode.dmPelsWidth, mode.dmPelsHeight))
+}
+
+/// What the screen looks like to the player while a game runs at another
+/// resolution, like 1280x960 "stretched" on a 1920x1080 monitor: the desktop's
+/// height with the panel's shape. Recording at this size also keeps the
+/// format, and so the replay buffer, unchanged when games switch modes.
+/// None when it's no different from the captured size, or for rotated screens.
+fn stretched_size(output: &IDXGIOutput1, src: (u32, u32)) -> Option<(u32, u32)> {
+    let name = unsafe { output.GetDesc().ok()? }.DeviceName;
+    let desktop = desktop_size(&name).unwrap_or(src);
+    stretch(src, desktop, panel_size(&name).unwrap_or(desktop))
+}
+
+fn stretch(src: (u32, u32), (desk_w, desk_h): (u32, u32), (panel_w, panel_h): (u32, u32)) -> Option<(u32, u32)> {
+    let landscape = |w: u32, h: u32| w >= h;
+    if landscape(panel_w, panel_h) != landscape(desk_w, desk_h) || landscape(src.0, src.1) != landscape(desk_w, desk_h) {
+        return None;
+    }
+    let size = ((desk_h as u64 * panel_w as u64 / panel_h as u64) as u32, desk_h);
+    (size != src).then_some(size)
 }
 
 /// NV12 needs even dimensions, and encoders like multiples of 2 at minimum.
@@ -243,7 +330,10 @@ pub fn run(cfg: VideoConfig, ring: Arc<Mutex<Ring>>, stop: Arc<AtomicBool>, stat
     }
     while !stop.load(Ordering::Relaxed) {
         match session(&cfg, &ring, &stop, &status) {
-            Ok(()) => break,
+            Ok(Session::Stopped) => break,
+            // A game switched resolution: start over right away, so the
+            // buffer barely misses a beat.
+            Ok(Session::ModeChanged) => log!("video: display mode changed, restarting"),
             Err(e) => {
                 log!("video: session ended: {e}");
                 *status.lock() = format!("Video error: {}", e.message());
@@ -259,7 +349,12 @@ pub fn run(cfg: VideoConfig, ring: Arc<Mutex<Ring>>, stop: Arc<AtomicBool>, stat
     }
 }
 
-fn session(cfg: &VideoConfig, ring: &Mutex<Ring>, stop: &AtomicBool, status: &Mutex<String>) -> Result<()> {
+enum Session {
+    Stopped,
+    ModeChanged,
+}
+
+fn session(cfg: &VideoConfig, ring: &Mutex<Ring>, stop: &AtomicBool, status: &Mutex<String>) -> Result<Session> {
     let mut list = monitors()?;
     if list.is_empty() {
         return Err(windows::core::Error::new(E_ACCESSDENIED, "no monitors found"));
@@ -294,7 +389,12 @@ fn session(cfg: &VideoConfig, ring: &Mutex<Ring>, stop: &AtomicBool, status: &Mu
     let mut dupl = Some(duplicate(&output, &device)?);
     let ddesc = unsafe { dupl.as_ref().unwrap().GetDesc() };
     let (src_w, src_h) = (ddesc.ModeDesc.Width, ddesc.ModeDesc.Height);
-    let (out_w, out_h) = output_size(src_w, src_h, cfg.height);
+    let stretched = if cfg.keep_stretched { stretched_size(&output, (src_w, src_h)) } else { None };
+    let (base_w, base_h) = stretched.unwrap_or((src_w, src_h));
+    let (out_w, out_h) = output_size(base_w, base_h, cfg.height);
+    if stretched.is_some() {
+        log!("video: the screen runs at {src_w}x{src_h}, recording it stretched to {base_w}x{base_h}");
+    }
 
     let frame = texture(
         &device,
@@ -346,6 +446,8 @@ fn session(cfg: &VideoConfig, ring: &Mutex<Ring>, stop: &AtomicBool, status: &Mu
     let mut next_surface = 0;
     let mut have_frame = false;
     let mut dropped = 0u64;
+    // A frame that was due while the encoder was busy, waiting to go in.
+    let mut pending: Option<i64> = None;
     let mut last_dupl_attempt = 0i64;
 
     let mut on_packet = |p| ring.lock().push_video(p);
@@ -389,33 +491,41 @@ fn session(cfg: &VideoConfig, ring: &Mutex<Ring>, stop: &AtomicBool, status: &Mu
                 let desc = unsafe { d.GetDesc() };
                 if (desc.ModeDesc.Width, desc.ModeDesc.Height) != (src_w, src_h) {
                     // Resolution changed: start over with a fresh pipeline.
-                    return Err(windows::core::Error::new(E_ACCESSDENIED, "display mode changed"));
+                    return Ok(Session::ModeChanged);
                 }
                 dupl = Some(d);
             }
         }
 
         // 2. Feed the encoder.
+        let mut encode = |encoder: &mut H264Encoder, pts: i64| -> Result<()> {
+            let input = match cursor.as_ref().filter(|c| c.visible()) {
+                Some(c) => {
+                    unsafe { context.CopyResource(&composed, &frame) };
+                    c.draw(&context);
+                    1
+                }
+                None => 0,
+            };
+            converter.convert(input, next_surface)?;
+            encoder.submit(&pool[next_surface], pts, interval as i64)?;
+            next_surface = (next_surface + 1) % POOL;
+            Ok(())
+        };
         encoder.poll(&mut on_packet, &mut on_seq)?;
         let pts = start + (tick as f64 * interval) as i64;
         if have_frame {
-            if encoder.wants_input() {
-                let input = match cursor.as_ref().filter(|c| c.visible()) {
-                    Some(c) => {
-                        unsafe { context.CopyResource(&composed, &frame) };
-                        c.draw(&context);
-                        1
-                    }
-                    None => 0,
-                };
-                converter.convert(input, next_surface)?;
-                encoder.submit(&pool[next_surface], pts, interval as i64)?;
-                next_surface = (next_surface + 1) % POOL;
-            } else {
+            if pending.take().is_some() {
+                // The encoder never got to the last one.
                 dropped += 1;
                 if dropped.is_power_of_two() {
                     log!("video: encoder busy, dropped {dropped} frames so far");
                 }
+            }
+            if encoder.wants_input() {
+                encode(&mut encoder, pts)?;
+            } else {
+                pending = Some(pts);
             }
         }
         encoder.poll(&mut on_packet, &mut on_seq)?;
@@ -429,11 +539,24 @@ fn session(cfg: &VideoConfig, ring: &Mutex<Ring>, stop: &AtomicBool, status: &Mu
             tick = behind + 1;
         }
         let due = start + (tick as f64 * interval) as i64;
-        let wait = due - clock::now();
-        if wait > 0 {
+        loop {
+            // At high frame rates the encoder often asks for the next frame
+            // just after it was due, so keep checking until the next one.
+            if pending.is_some() {
+                encoder.poll(&mut on_packet, &mut on_seq)?;
+                if encoder.wants_input() {
+                    encode(&mut encoder, pending.take().unwrap())?;
+                    encoder.poll(&mut on_packet, &mut on_seq)?;
+                }
+            }
+            let wait = due - clock::now();
+            if wait <= 0 {
+                break;
+            }
+            let step = if pending.is_some() { wait.min(SECOND / 2000) } else { wait };
             unsafe {
                 // Negative = relative time in 100ns units.
-                SetWaitableTimer(timer, &-wait, 0, None, None, false)?;
+                SetWaitableTimer(timer, &-step, 0, None, None, false)?;
                 WaitForSingleObject(timer, INFINITE);
             }
         }
@@ -444,5 +567,26 @@ fn session(cfg: &VideoConfig, ring: &Mutex<Ring>, stop: &AtomicBool, status: &Mu
     log!("video: loop exited, releasing encoder");
     drop(encoder);
     log!("video: encoder released");
-    Ok(())
+    Ok(Session::Stopped)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stretches_game_resolutions_to_the_screen() {
+        let hd = (1920, 1080);
+        // Nothing to do at the desktop resolution.
+        assert_eq!(stretch(hd, hd, hd), None);
+        // A game switched a 1080p screen to 4:3: record what the player sees.
+        assert_eq!(stretch((1280, 960), hd, hd), Some(hd));
+        // Same shape but smaller: still recorded at the desktop size, so the
+        // replay buffer survives the switch.
+        assert_eq!(stretch((1280, 720), hd, hd), Some(hd));
+        // The desktop itself set to stretched 4:3 on a 16:9 panel.
+        assert_eq!(stretch((1280, 960), (1280, 960), hd), Some((1706, 960)));
+        // Rotated screens are left alone.
+        assert_eq!(stretch((1080, 1920), (1080, 1920), hd), None);
+    }
 }

@@ -1,13 +1,21 @@
-//! Minimal MP4 writer for H.264 + AAC-LC. Writes the moov box before mdat
-//! ("faststart") so clips start playing immediately when uploaded somewhere.
+//! Minimal MP4 writer for H.264 + AAC-LC. Clips are written with the moov box
+//! before mdat ("faststart") so they start playing immediately when uploaded
+//! somewhere. Recordings are streamed to disk as they happen, so their moov box
+//! goes at the end once the sample tables are known.
+//!
+//! With several audio tracks, the first is the full mix and the only one marked
+//! enabled; the rest share its alternate group, so players pick one (the mix)
+//! while video editors import them all.
 
 use crate::prelude::*;
+
+use alloc::sync::Arc;
 
 use crate::rt::fs::{BufWriter, File};
 use crate::rt::{self, error};
 
 use crate::clock::SECOND;
-use crate::ring::Clip;
+use crate::ring::{Clip, Packet, VideoFormat};
 
 pub const AUDIO_RATE: u32 = 48_000;
 pub const AUDIO_CHANNELS: u16 = 2;
@@ -16,6 +24,7 @@ const AAC_FRAME: u32 = 1024;
 
 const MOVIE_TIMESCALE: u32 = 1000;
 const VIDEO_TIMESCALE: u32 = 90_000;
+const VIDEO_TRACK: u32 = 1;
 
 // ---------------------------------------------------------------------------
 // Annex B helpers
@@ -65,9 +74,8 @@ fn write_avcc(annexb: &[u8], w: &mut BufWriter) -> rt::Result<()> {
     Ok(())
 }
 
-fn find_param_sets(clip: &Clip) -> Option<(Vec<u8>, Vec<u8>)> {
-    let sources =
-        clip.video.iter().filter(|p| p.key).map(|p| p.data.as_slice()).chain([clip.format.seq_header.as_slice()]);
+/// SPS and PPS from the first of `sources` that has both.
+fn find_param_sets<'a>(sources: impl IntoIterator<Item = &'a [u8]>) -> Option<(Vec<u8>, Vec<u8>)> {
     for data in sources {
         let mut sps = None;
         let mut pps = None;
@@ -79,7 +87,9 @@ fn find_param_sets(clip: &Clip) -> Option<(Vec<u8>, Vec<u8>)> {
             }
         }
         if let (Some(s), Some(p)) = (sps, pps) {
-            return Some((s, p));
+            if s.len() >= 4 {
+                return Some((s, p));
+            }
         }
     }
     None
@@ -136,6 +146,16 @@ impl Mp4 {
     }
 }
 
+fn ftyp() -> Vec<u8> {
+    let mut m = Mp4::new();
+    m.begin(b"ftyp");
+    m.bytes(b"isom");
+    m.u32(0x200);
+    m.bytes(b"isomiso2avc1mp41");
+    m.end();
+    m.buf
+}
+
 struct Track {
     id: u32,
     timescale: u32,
@@ -154,6 +174,62 @@ struct Track {
 }
 
 impl Track {
+    fn new(id: u32, timescale: u32) -> Self {
+        Self {
+            id,
+            timescale,
+            sizes: Vec::new(),
+            offsets: Vec::new(),
+            stts: Vec::new(),
+            ctts: Vec::new(),
+            sync: Vec::new(),
+            duration: 0,
+            start_offset: 0,
+        }
+    }
+
+    /// Video sample table from presentation times (shared clock), in decode
+    /// order. Decode times are the sorted presentation times, which also covers
+    /// encoders that emit B-frames (their reordering goes into ctts). Durations
+    /// come from timestamp deltas so dropped frames keep the clip in sync with
+    /// audio.
+    fn video(pts: &[i64], t0: i64, keys: &[bool], sizes: Vec<u32>, fps: u32) -> Self {
+        let mut t = Self::new(VIDEO_TRACK, VIDEO_TIMESCALE);
+        let pts: Vec<i64> = pts.iter().map(|&p| to_scale(p - t0, VIDEO_TIMESCALE) as i64).collect();
+        let mut dts = pts.clone();
+        dts.sort_unstable();
+        let nominal = VIDEO_TIMESCALE / fps.max(1);
+        for (i, &key) in keys.iter().enumerate() {
+            if key {
+                t.sync.push(i as u32 + 1);
+            }
+            let d = dts.get(i + 1).map_or(nominal, |next| (next - dts[i]) as u32);
+            t.push_duration(d.max(1));
+        }
+        if pts != dts {
+            for (p, d) in pts.iter().zip(&dts) {
+                let offset = (p - d) as i32;
+                match t.ctts.last_mut() {
+                    Some((count, o)) if *o == offset => *count += 1,
+                    _ => t.ctts.push((1, offset)),
+                }
+            }
+        }
+        t.sizes = sizes;
+        t
+    }
+
+    /// Audio sample table: back-to-back AAC frames starting at `first_pts`.
+    fn audio(id: u32, first_pts: i64, t0: i64, sizes: Vec<u32>) -> Self {
+        let mut t = Self::new(id, AUDIO_RATE);
+        t.start_offset = to_scale(first_pts - t0, MOVIE_TIMESCALE);
+        for _ in 0..sizes.len() {
+            t.push_duration(AAC_FRAME);
+        }
+        t.sizes = sizes;
+        t
+    }
+
     fn push_duration(&mut self, d: u32) {
         match self.stts.last_mut() {
             Some((count, delta)) if *delta == d => *count += 1,
@@ -185,7 +261,7 @@ impl Track {
             m.end();
         }
 
-        if self.id == 1 {
+        if self.id == VIDEO_TRACK {
             m.begin_full(b"stss", 0, 0);
             m.u32(self.sync.len() as u32);
             for &s in &self.sync {
@@ -219,7 +295,10 @@ impl Track {
     }
 
     fn write_header(&self, m: &mut Mp4, width: u32, height: u32) {
-        m.begin_full(b"tkhd", 0, 3); // enabled | in movie
+        let audio = self.id != VIDEO_TRACK;
+        // Only the first audio track is enabled; the others are alternatives.
+        let enabled = self.id <= VIDEO_TRACK + 1;
+        m.begin_full(b"tkhd", 0, if enabled { 3 } else { 2 }); // enabled | in movie
         m.u32(0);
         m.u32(0);
         m.u32(self.id);
@@ -227,8 +306,8 @@ impl Track {
         m.u32(self.movie_duration() + self.start_offset as u32);
         m.zeros(8);
         m.u16(0); // layer
-        m.u16(0); // alternate group
-        m.u16(if self.id == 2 { 0x0100 } else { 0 }); // volume
+        m.u16(if audio { 1 } else { 0 }); // alternate group
+        m.u16(if audio { 0x0100 } else { 0 }); // volume
         m.u16(0);
         m.matrix();
         m.u32(width << 16);
@@ -280,13 +359,16 @@ fn write_dinf(m: &mut Mp4) {
     m.end();
 }
 
-fn write_moov(clip: &Clip, sps: &[u8], pps: &[u8], video: &Track, audio: Option<&Track>) -> Vec<u8> {
-    let f = &clip.format;
+fn write_moov(f: &VideoFormat, sps: &[u8], pps: &[u8], video: &Track, audio: &[(&Track, &str)]) -> Vec<u8> {
     let mut m = Mp4::new();
     m.begin(b"moov");
 
-    let movie_duration =
-        audio.map(|a| a.movie_duration() + a.start_offset as u32).unwrap_or(0).max(video.movie_duration());
+    let movie_duration = audio
+        .iter()
+        .map(|(a, _)| a.movie_duration() + a.start_offset as u32)
+        .chain([video.movie_duration()])
+        .max()
+        .unwrap_or(0);
     m.begin_full(b"mvhd", 0, 0);
     m.u32(0);
     m.u32(0);
@@ -297,7 +379,7 @@ fn write_moov(clip: &Clip, sps: &[u8], pps: &[u8], video: &Track, audio: Option<
     m.zeros(10);
     m.matrix();
     m.zeros(24);
-    m.u32(3); // next track id
+    m.u32(VIDEO_TRACK + 1 + audio.len() as u32); // next track id
     m.end();
 
     // --- video track
@@ -358,12 +440,12 @@ fn write_moov(clip: &Clip, sps: &[u8], pps: &[u8], video: &Track, audio: Option<
     m.end(); // mdia
     m.end(); // trak
 
-    // --- audio track
-    if let Some(audio) = audio {
+    // --- audio tracks
+    for (audio, name) in audio {
         m.begin(b"trak");
         audio.write_header(&mut m, 0, 0);
         m.begin(b"mdia");
-        audio.write_mdhd(&mut m, b"soun", "SoundHandler");
+        audio.write_mdhd(&mut m, b"soun", name);
         m.begin(b"minf");
         m.begin_full(b"smhd", 0, 0);
         m.u32(0);
@@ -384,7 +466,7 @@ fn write_moov(clip: &Clip, sps: &[u8], pps: &[u8], video: &Track, audio: Option<
         // ES_Descriptor
         m.u8(0x03);
         m.u8(25);
-        m.u16(2); // ES_ID
+        m.u16(audio.id as u16); // ES_ID
         m.u8(0);
         // DecoderConfigDescriptor
         m.u8(0x04);
@@ -426,117 +508,224 @@ fn to_scale(t: i64, scale: u32) -> u64 {
     (t.max(0) as i128 * scale as i128 / SECOND as i128) as u64
 }
 
+// ---------------------------------------------------------------------------
+// Clips: everything is in memory, so the moov box goes first.
+
 pub fn write_mp4(path: &str, clip: &Clip) -> rt::Result<u64> {
     let invalid = error;
-    let (sps, pps) = find_param_sets(clip).ok_or_else(|| invalid("no SPS/PPS in stream"))?;
-    if sps.len() < 4 {
-        return Err(invalid("bad SPS"));
-    }
+    let param_sources =
+        clip.video.iter().filter(|p| p.key).map(|p| p.data.as_slice()).chain([clip.format.seq_header.as_slice()]);
+    let (sps, pps) = find_param_sets(param_sources).ok_or_else(|| invalid("no SPS/PPS in stream"))?;
     let t0 = clip.video.iter().map(|p| p.pts).min().ok_or_else(|| invalid("empty clip"))?;
 
-    let new_track = |id, timescale| Track {
-        id,
-        timescale,
-        sizes: Vec::new(),
-        offsets: Vec::new(),
-        stts: Vec::new(),
-        ctts: Vec::new(),
-        sync: Vec::new(),
-        duration: 0,
-        start_offset: 0,
-    };
+    let pts: Vec<i64> = clip.video.iter().map(|p| p.pts).collect();
+    let keys: Vec<bool> = clip.video.iter().map(|p| p.key).collect();
+    let sizes = clip.video.iter().map(|p| avcc_size(&p.data)).collect();
+    let mut video = Track::video(&pts, t0, &keys, sizes, clip.format.fps);
 
-    // Video sample table. Samples are stored in decode order; decode times are
-    // the sorted presentation times, which also covers encoders that emit
-    // B-frames (their reordering goes into ctts). Durations come from timestamp
-    // deltas so dropped frames keep the clip in sync with audio.
-    let mut video = new_track(1, VIDEO_TIMESCALE);
-    let pts: Vec<i64> = clip.video.iter().map(|p| to_scale(p.pts - t0, VIDEO_TIMESCALE) as i64).collect();
-    let mut dts = pts.clone();
-    dts.sort_unstable();
-    let nominal = VIDEO_TIMESCALE / clip.format.fps.max(1);
-    for (i, p) in clip.video.iter().enumerate() {
-        video.sizes.push(avcc_size(&p.data));
-        if p.key {
-            video.sync.push(i as u32 + 1);
-        }
-        let d = dts.get(i + 1).map_or(nominal, |next| (next - dts[i]) as u32);
-        video.push_duration(d.max(1));
-    }
-    if pts != dts {
-        for (p, d) in pts.iter().zip(&dts) {
-            let offset = (p - d) as i32;
-            match video.ctts.last_mut() {
-                Some((count, o)) if *o == offset => *count += 1,
-                _ => video.ctts.push((1, offset)),
-            }
+    // Tracks without packets are left out, but the rest keep their order.
+    let mut audio: Vec<(Track, &str, &[Arc<Packet>])> = Vec::new();
+    for (packets, name) in clip.audio.iter().zip(&clip.audio_names) {
+        if let Some(first) = packets.first() {
+            let id = VIDEO_TRACK + 1 + audio.len() as u32;
+            let sizes = packets.iter().map(|p| p.data.len() as u32).collect();
+            audio.push((Track::audio(id, first.pts, t0, sizes), name, packets));
         }
     }
 
-    let mut audio = if clip.audio.is_empty() {
-        None
-    } else {
-        let mut a = new_track(2, AUDIO_RATE);
-        a.start_offset = to_scale(clip.audio[0].pts - t0, MOVIE_TIMESCALE);
-        for p in &clip.audio {
-            a.sizes.push(p.data.len() as u32);
-            a.push_duration(AAC_FRAME);
-        }
-        Some(a)
-    };
-
-    // Interleave samples by timestamp: (track, index).
-    let mut order: Vec<(bool, usize, i64)> = Vec::with_capacity(clip.video.len() + clip.audio.len());
-    order.extend(clip.video.iter().enumerate().map(|(i, p)| (true, i, p.pts)));
-    order.extend(clip.audio.iter().enumerate().map(|(i, p)| (false, i, p.pts)));
+    // Interleave samples by timestamp: (track index, sample index), where
+    // track 0 is video and n is audio track n - 1.
+    let mut order: Vec<(usize, usize, i64)> = Vec::new();
+    order.extend(clip.video.iter().enumerate().map(|(i, p)| (0, i, p.pts)));
+    for (t, (_, _, packets)) in audio.iter().enumerate() {
+        order.extend(packets.iter().enumerate().map(|(i, p)| (t + 1, i, p.pts)));
+    }
     order.sort_by_key(|&(_, _, pts)| pts);
 
-    let assign_offsets = |base: u64, video: &mut Track, audio: &mut Option<Track>| {
+    let assign_offsets = |base: u64, video: &mut Track, audio: &mut [(Track, &str, &[Arc<Packet>])]| {
         video.offsets.clear();
-        if let Some(a) = audio.as_mut() {
-            a.offsets.clear();
+        for a in audio.iter_mut() {
+            a.0.offsets.clear();
         }
         let mut off = base;
-        for &(is_video, i, _) in &order {
-            let track = if is_video { &mut *video } else { audio.as_mut().unwrap() };
+        for &(t, i, _) in &order {
+            let track = if t == 0 { &mut *video } else { &mut audio[t - 1].0 };
             track.offsets.push(off);
             off += track.sizes[i] as u64;
         }
         off - base
     };
 
-    let mut ftyp = Mp4::new();
-    ftyp.begin(b"ftyp");
-    ftyp.bytes(b"isom");
-    ftyp.u32(0x200);
-    ftyp.bytes(b"isomiso2avc1mp41");
-    ftyp.end();
+    let ftyp = ftyp();
+    let moov = |video: &Track, audio: &[(Track, &str, &[Arc<Packet>])]| {
+        let tracks: Vec<(&Track, &str)> = audio.iter().map(|(t, name, _)| (t, *name)).collect();
+        write_moov(&clip.format, &sps, &pps, video, &tracks)
+    };
 
     // co64 entries are fixed size, so the moov size doesn't depend on the
     // offsets: build once to measure, then again with real offsets.
     let mdat_payload = assign_offsets(0, &mut video, &mut audio);
-    let moov_len = write_moov(clip, &sps, &pps, &video, audio.as_ref()).len() as u64;
+    let moov_len = moov(&video, &audio).len() as u64;
     let mdat_header = 16u64;
-    let base = ftyp.buf.len() as u64 + moov_len + mdat_header;
+    let base = ftyp.len() as u64 + moov_len + mdat_header;
     assign_offsets(base, &mut video, &mut audio);
-    let moov = write_moov(clip, &sps, &pps, &video, audio.as_ref());
+    let moov = moov(&video, &audio);
     debug_assert_eq!(moov.len() as u64, moov_len);
 
     let mut w = BufWriter::new(File::create(path)?, 1 << 20);
-    w.write_all(&ftyp.buf)?;
+    w.write_all(&ftyp)?;
     w.write_all(&moov)?;
     w.write_all(&1u32.to_be_bytes())?;
     w.write_all(b"mdat")?;
     w.write_all(&(mdat_header + mdat_payload).to_be_bytes())?;
-    for &(is_video, i, _) in &order {
-        if is_video {
+    for &(t, i, _) in &order {
+        if t == 0 {
             write_avcc(&clip.video[i].data, &mut w)?;
         } else {
-            w.write_all(&clip.audio[i].data)?;
+            w.write_all(&audio[t - 1].2[i].data)?;
         }
     }
     w.flush()?;
     Ok(base + mdat_payload)
+}
+
+// ---------------------------------------------------------------------------
+// Recordings: samples go to disk as they arrive, and the moov box is appended
+// when the recording stops.
+
+#[derive(Default)]
+struct AudioSamples {
+    first_pts: Option<i64>,
+    sizes: Vec<u32>,
+    offsets: Vec<u64>,
+}
+
+pub struct Mp4Writer {
+    w: BufWriter,
+    /// Where the next byte goes.
+    pos: u64,
+    /// Offset of the mdat box header.
+    mdat: u64,
+    /// Presentation time of the first video frame (a keyframe).
+    t0: Option<i64>,
+    params: Option<(Vec<u8>, Vec<u8>)>,
+    format: Option<VideoFormat>,
+    video_pts: Vec<i64>,
+    video_keys: Vec<bool>,
+    video_sizes: Vec<u32>,
+    video_offsets: Vec<u64>,
+    audio: Vec<AudioSamples>,
+    audio_names: Vec<String>,
+}
+
+impl Mp4Writer {
+    pub fn create(path: &str, audio_names: Vec<String>) -> rt::Result<Self> {
+        let mut w = BufWriter::new(File::create(path)?, 1 << 20);
+        let ftyp = ftyp();
+        w.write_all(&ftyp)?;
+        // 64-bit size, filled in by finish().
+        w.write_all(&1u32.to_be_bytes())?;
+        w.write_all(b"mdat")?;
+        w.write_all(&0u64.to_be_bytes())?;
+        Ok(Self {
+            w,
+            pos: ftyp.len() as u64 + 16,
+            mdat: ftyp.len() as u64,
+            t0: None,
+            params: None,
+            format: None,
+            video_pts: Vec::new(),
+            video_keys: Vec::new(),
+            video_sizes: Vec::new(),
+            video_offsets: Vec::new(),
+            audio: audio_names.iter().map(|_| AudioSamples::default()).collect(),
+            audio_names,
+        })
+    }
+
+    pub fn set_format(&mut self, format: VideoFormat) {
+        self.format = Some(format);
+    }
+
+    /// The recording starts at the first keyframe; anything before is dropped.
+    pub fn video(&mut self, p: &Packet) -> rt::Result<()> {
+        if self.t0.is_none() {
+            if !p.key {
+                return Ok(());
+            }
+            self.t0 = Some(p.pts);
+        }
+        if self.params.is_none() && p.key {
+            self.params = find_param_sets([p.data.as_slice()]);
+        }
+        let size = avcc_size(&p.data);
+        self.video_pts.push(p.pts);
+        self.video_keys.push(p.key);
+        self.video_sizes.push(size);
+        self.video_offsets.push(self.pos);
+        write_avcc(&p.data, &mut self.w)?;
+        self.pos += size as u64;
+        Ok(())
+    }
+
+    pub fn audio(&mut self, track: usize, p: &Packet) -> rt::Result<()> {
+        let Some(t0) = self.t0 else { return Ok(()) };
+        let Some(a) = self.audio.get_mut(track) else { return Ok(()) };
+        if p.pts < t0 {
+            return Ok(());
+        }
+        a.first_pts.get_or_insert(p.pts);
+        a.sizes.push(p.data.len() as u32);
+        a.offsets.push(self.pos);
+        self.w.write_all(&p.data)?;
+        self.pos += p.data.len() as u64;
+        Ok(())
+    }
+
+    /// Seconds of video written so far.
+    pub fn seconds(&self) -> u32 {
+        match (self.video_pts.first(), self.video_pts.last()) {
+            (Some(first), Some(last)) => ((last - first) / SECOND) as u32,
+            _ => 0,
+        }
+    }
+
+    /// Write the moov box and fix up the mdat size. Returns the file size.
+    pub fn finish(mut self) -> rt::Result<u64> {
+        let t0 = self.t0.ok_or_else(|| error("nothing was recorded"))?;
+        let mut format = self.format.clone().ok_or_else(|| error("no video format"))?;
+        let (sps, pps) = match self.params.take() {
+            Some(p) => p,
+            None => find_param_sets([format.seq_header.as_slice()]).ok_or_else(|| error("no SPS/PPS in stream"))?,
+        };
+        format.seq_header.clear();
+
+        let mut video = Track::video(
+            &self.video_pts,
+            t0,
+            &self.video_keys,
+            core::mem::take(&mut self.video_sizes),
+            format.fps,
+        );
+        video.offsets = core::mem::take(&mut self.video_offsets);
+        let mut audio = Vec::new();
+        for (a, name) in self.audio.iter_mut().zip(&self.audio_names) {
+            if let Some(first) = a.first_pts {
+                let id = VIDEO_TRACK + 1 + audio.len() as u32;
+                let mut t = Track::audio(id, first, t0, core::mem::take(&mut a.sizes));
+                t.offsets = core::mem::take(&mut a.offsets);
+                audio.push((t, name.as_str()));
+            }
+        }
+        let audio: Vec<(&Track, &str)> = audio.iter().map(|(t, name)| (t, *name)).collect();
+        let moov = write_moov(&format, &sps, &pps, &video, &audio);
+        let mdat_size = self.pos - self.mdat;
+        self.w.write_all(&moov)?;
+        self.w.seek(self.mdat + 8)?;
+        self.w.write_all(&mdat_size.to_be_bytes())?;
+        self.w.flush()?;
+        Ok(self.pos + moov.len() as u64)
+    }
 }
 
 #[cfg(test)]

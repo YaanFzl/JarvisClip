@@ -97,8 +97,8 @@ jobs:
           notes="Three builds of the same app, pick one:
 
           - **bufferless.exe** is the standard build and the safest bet with antivirus.
-          - **bufferless-small.exe** is the same app without Rust's std or the C runtime (~110 KB).
-          - **bufferless-tiny.exe** is the small build packed with UPX (~57 KB). Packed exes are often flagged by antivirus heuristics."
+          - **bufferless-small.exe** is the same app without Rust's std or the C runtime (~165 KB).
+          - **bufferless-tiny.exe** is the small build packed with UPX (~80 KB). Packed exes are often flagged by antivirus heuristics."
           # Creates the tag too when it doesn't exist yet. Tags made with the
           # workflow token don't trigger another run.
           gh release create "$VERSION" dist/bufferless.exe dist/bufferless-small.exe dist/bufferless-tiny.exe \

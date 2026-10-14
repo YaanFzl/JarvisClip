@@ -6,9 +6,13 @@ use crate::rt::OnceLock;
 
 use windows::Win32::Foundation::{CloseHandle, HWND};
 use windows::Win32::Graphics::Gdi::*;
-use windows::Win32::Media::Audio::{PlaySoundW, SND_ALIAS, SND_ASYNC, SND_MEMORY, SND_NODEFAULT};
+use windows::Win32::Media::Audio::{PlaySoundW, SND_ALIAS, SND_ASYNC, SND_FILENAME, SND_MEMORY, SND_NODEFAULT};
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+};
 use windows::Win32::System::Registry::{
-    HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_DWORD, RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW,
+    HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, REG_SZ, RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW,
+    RegSetKeyValueW,
 };
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::System::Threading::{
@@ -79,15 +83,14 @@ pub fn app_icon(size: i32) -> HICON {
     icon_from_rgba(size, &crate::icon::tile(size))
 }
 
-/// Whether the taskbar uses the light theme (so tray icons should be dark).
-pub fn taskbar_is_light() -> bool {
+fn personalize_flag(name: PCWSTR) -> bool {
     let mut value = 0u32;
     let mut size = size_of::<u32>() as u32;
     unsafe {
         RegGetValueW(
             HKEY_CURRENT_USER,
             w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
-            w!("SystemUsesLightTheme"),
+            name,
             RRF_RT_REG_DWORD,
             None,
             Some(&mut value as *mut u32 as _),
@@ -98,44 +101,97 @@ pub fn taskbar_is_light() -> bool {
     }
 }
 
-/// Short two-note blip, synthesized once and played from memory.
-pub fn play_saved_sound() {
-    static WAV: OnceLock<Vec<u8>> = OnceLock::new();
-    let wav = WAV.get_or_init(|| {
-        const RATE: u32 = 44_100;
-        let mut pcm: Vec<i16> = Vec::new();
-        for (freq, ms) in [(880.0f32, 70), (1320.0, 90)] {
-            let n = RATE * ms / 1000;
-            for i in 0..n {
-                let t = i as f32 / RATE as f32;
-                // Quick fade in/out so it doesn't click.
-                let env = (i.min(n - i) as f32 / (RATE as f32 * 0.008)).min(1.0);
-                let v = crate::rt::math::sin(t * freq * core::f32::consts::TAU) * env * 0.25;
-                pcm.push((v * i16::MAX as f32) as i16);
-            }
+/// Whether the taskbar uses the light theme (so tray icons should be dark).
+pub fn taskbar_is_light() -> bool {
+    personalize_flag(w!("SystemUsesLightTheme"))
+}
+
+/// Whether apps should use the light theme ("Choose your app mode").
+pub fn apps_use_light_theme() -> bool {
+    personalize_flag(w!("AppsUseLightTheme"))
+}
+
+/// The Windows build number, e.g. 22631. 0 if unknown.
+pub fn windows_build() -> u32 {
+    let mut buf = [0u16; 16];
+    let mut size = (buf.len() * 2) as u32;
+    unsafe {
+        let r = RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            w!(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"),
+            w!("CurrentBuildNumber"),
+            RRF_RT_REG_SZ,
+            None,
+            Some(buf.as_mut_ptr() as _),
+            Some(&mut size),
+        );
+        if r.is_err() {
+            return 0;
         }
-        let data_len = pcm.len() as u32 * 2;
-        let mut w = Vec::with_capacity(44 + data_len as usize);
-        w.extend_from_slice(b"RIFF");
-        w.extend_from_slice(&(36 + data_len).to_le_bytes());
-        w.extend_from_slice(b"WAVEfmt ");
-        w.extend_from_slice(&16u32.to_le_bytes());
-        w.extend_from_slice(&1u16.to_le_bytes()); // PCM
-        w.extend_from_slice(&1u16.to_le_bytes()); // mono
-        w.extend_from_slice(&RATE.to_le_bytes());
-        w.extend_from_slice(&(RATE * 2).to_le_bytes());
-        w.extend_from_slice(&2u16.to_le_bytes());
-        w.extend_from_slice(&16u16.to_le_bytes());
-        w.extend_from_slice(b"data");
-        w.extend_from_slice(&data_len.to_le_bytes());
-        for s in pcm {
-            w.extend_from_slice(&s.to_le_bytes());
+    }
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    String::from_utf16_lossy(&buf[..len]).parse().unwrap_or(0)
+}
+
+/// A WAV file of short tones (frequency, milliseconds), synthesized in memory.
+fn tones(notes: &[(f32, u32)]) -> Vec<u8> {
+    const RATE: u32 = 44_100;
+    let mut pcm: Vec<i16> = Vec::new();
+    for &(freq, ms) in notes {
+        let n = RATE * ms / 1000;
+        for i in 0..n {
+            let t = i as f32 / RATE as f32;
+            // Quick fade in/out so it doesn't click.
+            let env = (i.min(n - i) as f32 / (RATE as f32 * 0.008)).min(1.0);
+            let v = crate::rt::math::sin(t * freq * core::f32::consts::TAU) * env * 0.25;
+            pcm.push((v * i16::MAX as f32) as i16);
         }
-        w
-    });
+    }
+    let data_len = pcm.len() as u32 * 2;
+    let mut w = Vec::with_capacity(44 + data_len as usize);
+    w.extend_from_slice(b"RIFF");
+    w.extend_from_slice(&(36 + data_len).to_le_bytes());
+    w.extend_from_slice(b"WAVEfmt ");
+    w.extend_from_slice(&16u32.to_le_bytes());
+    w.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    w.extend_from_slice(&1u16.to_le_bytes()); // mono
+    w.extend_from_slice(&RATE.to_le_bytes());
+    w.extend_from_slice(&(RATE * 2).to_le_bytes());
+    w.extend_from_slice(&2u16.to_le_bytes());
+    w.extend_from_slice(&16u16.to_le_bytes());
+    w.extend_from_slice(b"data");
+    w.extend_from_slice(&data_len.to_le_bytes());
+    for s in pcm {
+        w.extend_from_slice(&s.to_le_bytes());
+    }
+    w
+}
+
+fn play_wav(wav: &[u8]) {
     unsafe {
         let _ = PlaySoundW(PCWSTR(wav.as_ptr() as *const u16), None, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
     }
+}
+
+/// The "clip saved" sound: `file` (a .wav) if set, otherwise a short
+/// two-note blip.
+pub fn play_saved_sound(file: &str) {
+    if !file.is_empty() {
+        let path = wide(file);
+        let played = unsafe { PlaySoundW(PCWSTR(path.as_ptr()), None, SND_FILENAME | SND_ASYNC | SND_NODEFAULT) };
+        if played.as_bool() {
+            return;
+        }
+        crate::log!("couldn't play {file}, using the built-in sound");
+    }
+    static WAV: OnceLock<Vec<u8>> = OnceLock::new();
+    play_wav(WAV.get_or_init(|| tones(&[(880.0, 70), (1320.0, 90)])));
+}
+
+/// A single low blip for "recording started".
+pub fn play_recording_sound() {
+    static WAV: OnceLock<Vec<u8>> = OnceLock::new();
+    play_wav(WAV.get_or_init(|| tones(&[(660.0, 110)])));
 }
 
 pub fn play_error_sound() {
@@ -150,22 +206,54 @@ pub fn timestamp() -> String {
     format!("{:04}-{:02}-{:02} {:02}-{:02}-{:02}", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond)
 }
 
+/// Full path of a process's exe.
+pub fn process_path(pid: u32) -> Option<String> {
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let r = QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len);
+        let _ = CloseHandle(process);
+        r.ok()?;
+        Some(String::from_utf16_lossy(&buf[..len as usize]))
+    }
+}
+
+pub struct Process {
+    pub pid: u32,
+    pub parent: u32,
+    /// Exe file name, e.g. "Discord.exe".
+    pub exe: String,
+}
+
+/// Every running process.
+pub fn processes() -> Vec<Process> {
+    let mut out = Vec::new();
+    unsafe {
+        let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return out };
+        let mut entry = PROCESSENTRY32W { dwSize: size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        let mut ok = Process32FirstW(snapshot, &mut entry).is_ok();
+        while ok {
+            let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
+            out.push(Process {
+                pid: entry.th32ProcessID,
+                parent: entry.th32ParentProcessID,
+                exe: String::from_utf16_lossy(&entry.szExeFile[..len]),
+            });
+            ok = Process32NextW(snapshot, &mut entry).is_ok();
+        }
+        let _ = CloseHandle(snapshot);
+    }
+    out
+}
+
 /// Name of the app in the foreground (usually the game), for clip file names.
 pub fn foreground_app_name() -> String {
     unsafe {
         let hwnd = GetForegroundWindow();
         let mut pid = 0u32;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        let name = (|| {
-            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
-            let mut buf = [0u16; 1024];
-            let mut len = buf.len() as u32;
-            let r = QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len);
-            let _ = CloseHandle(process);
-            r.ok()?;
-            let path = String::from_utf16_lossy(&buf[..len as usize]);
-            Some(crate::rt::path::file_stem(&path).to_string())
-        })();
+        let name = process_path(pid).map(|p| crate::rt::path::file_stem(&p).to_string());
         match name.as_deref() {
             None | Some("explorer") | Some("bufferless") => "Desktop".into(),
             Some(n) => n.chars().filter(|c| !r#"<>:"/\|?*"#.contains(*c)).collect(),
@@ -174,6 +262,9 @@ pub fn foreground_app_name() -> String {
 }
 
 pub fn hotkey_name(modifiers: u32, vk: u32) -> String {
+    if vk == 0 {
+        return "None".into();
+    }
     let mut parts = Vec::new();
     for (flag, name) in [(MOD_CONTROL, "Ctrl"), (MOD_ALT, "Alt"), (MOD_SHIFT, "Shift"), (MOD_WIN, "Win")] {
         if modifiers & flag.0 != 0 {
@@ -185,8 +276,11 @@ pub fn hotkey_name(modifiers: u32, vk: u32) -> String {
         0x30..=0x39 | 0x41..=0x5a => char::from_u32(vk).unwrap().to_string(),
         _ => unsafe {
             let scan = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
+            // Without the extended-key bit these read as their numpad twins
+            // (Home is "Num 7") and Print Screen as "Sys Req".
+            let extended = matches!(vk, 0x21..=0x2e | 0x5b..=0x5d | 0x6f | 0x90 | 0xa3 | 0xa5);
             let mut buf = [0u16; 64];
-            let n = GetKeyNameTextW((scan << 16) as i32, &mut buf);
+            let n = GetKeyNameTextW((scan << 16 | (extended as u32) << 24) as i32, &mut buf);
             if n > 0 { String::from_utf16_lossy(&buf[..n as usize]) } else { format!("Key {vk}") }
         },
     };

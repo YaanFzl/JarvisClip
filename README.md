@@ -13,8 +13,9 @@
 **Bufferless** quietly keeps the last minute of your screen in memory. When something
 worth keeping happens, press **Alt+F10** and it's saved as an MP4. It's like NVIDIA
 Instant Replay without the overlay, the account, or the pile of background services.
+Need the whole match? **Ctrl+Alt+F9** starts and stops a normal recording too.
 
-- **Tiny.** One exe, 300 KB (or 55 KB if you want to show off). Nothing to install.
+- **Tiny.** One exe, 400 KB (or 80 KB if you want to show off). Nothing to install.
 - **Light.** Your GPU's built-in video encoder does the work, so games barely notice.
 - **Instant.** Saving takes about 10 ms because nothing gets re-encoded.
 - **Any GPU.** Uses Windows' standard hardware encoders, so it should work on NVIDIA,
@@ -45,9 +46,9 @@ Every release has three versions of the same app. They behave identically.
 
 | File | Size | Pick it if... |
 | --- | --- | --- |
-| **`bufferless.exe`** | ~300 KB | You just want it to work. **Start here.** |
-| `bufferless-small.exe` | ~107 KB | You like small things. |
-| `bufferless-tiny.exe` | ~55 KB | You want bragging rights. It's compressed with UPX, which antivirus tools sometimes flag as suspicious. |
+| **`bufferless.exe`** | ~400 KB | You just want it to work. **Start here.** |
+| `bufferless-small.exe` | ~165 KB | You like small things. |
+| `bufferless-tiny.exe` | ~80 KB | You want bragging rights. It's compressed with UPX, which antivirus tools sometimes flag as suspicious. |
 
 > [!NOTE]
 > The exe isn't code-signed, so Windows may say **"Windows protected your PC"** the
@@ -60,18 +61,26 @@ Right-click it for the menu, or double-click it to open settings.
 | Menu item | What it does |
 | --- | --- |
 | **Save clip** | Same as pressing the hotkey. |
+| **Start recording** / **Stop recording** | Same as the record hotkey. |
 | **Open clips folder** | Opens `Videos\Bufferless` (or wherever you pointed it). |
 | **Settings...** | Opens the settings window. |
 | **Quit** | Stops recording and exits. |
 
-If the icon looks faded, something's wrong (for example the GPU encoder couldn't
-start). Hover over it to see what's going on.
+A red dot on the icon means a recording is running. If the icon looks faded,
+something's wrong (for example the GPU encoder couldn't start). Hover over it to
+see what's going on.
 
 ## Settings
 
-<img src="docs/settings.png" alt="The Bufferless settings window" align="right" width="360">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/settings-dark.png">
+  <img src="docs/settings.png" alt="The Bufferless settings window" width="100%">
+</picture>
 
-**Save clip hotkey.** Click the box and press the combination you want.
+### Recording
+
+**Save clip hotkey** and **Record hotkey.** Click a box and press the combination you
+want. Backspace clears it.
 
 **Replay length.** How far back each clip goes, from 15 seconds to 20 minutes.
 
@@ -79,23 +88,52 @@ start). Hover over it to see what's going on.
 
 **Resolution.** Record smaller than your screen to save memory and disk space.
 
-**Frame rate.** 60 fps is a good default. Going higher only helps if your monitor refreshes that fast.
+**Frame rate.** 60 fps is a good default. 240 and 360 fps are there for fast
+monitors, but going above your monitor's refresh rate just repeats frames. Give
+high frame rates more bitrate too.
 
 **Bitrate.** Higher means sharper video but more memory. The window shows how much
 RAM your choice will use.
 
 **Record the mouse cursor.** Draw your cursor into clips. Games that hide it stay hidden.
 
-**Audio.** Record what you hear, your microphone, or both (they're mixed into one
-track). Pick which mic and set its volume.
+**Keep stretched resolutions stretched.** When a game switches your screen to
+something like 1280x960 stretched, clips are recorded stretched to fill the screen,
+the way you see it. Turn this off if your GPU shows such resolutions with black bars
+instead.
 
-**Save clips to.** Where clips go.
+### Audio
+
+**System audio.** Records what you hear. Pick an output from the list to record a
+specific device (handy with virtual audio cables) instead of whatever's the default.
+
+**Microphone.** Pick which mic and set its volume.
+
+**Save each source on its own track too.** Track 1 always has everything mixed
+together, so clips sound right anywhere. With this on, system audio and the mic also
+get their own tracks, for editing in Premiere, DaVinci Resolve and the like.
+
+**App tracks** (Windows 11). Give apps their own track too, one per line, like
+`Discord: discord.exe` or `Browser: chrome.exe, msedge.exe`. **Add app...** lists
+everything that's playing sound right now.
+
+### When a clip is saved
+
+**Play a sound.** Leave the sound file empty for the built-in chime, or pick any
+`.wav`.
+
+**Show a notification.** Turn off the "Clip saved" pop-ups. Problems (like a full
+disk) still show up.
+
+### General
+
+**Save clips to.** Where clips and recordings go.
+
+**Theme.** Light, dark, or the same as Windows.
 
 **Start with Windows.** Launch automatically when you sign in.
 
 Settings are saved to `%APPDATA%\bufferless\config.toml`, next to a small log file.
-
-<br clear="right">
 
 ## Questions
 
@@ -108,10 +146,32 @@ or pick a different hotkey in Bufferless's settings (Ctrl+Alt+F10 works well).
 </details>
 
 <details>
+<summary><b>How do recordings work?</b></summary>
+
+Press **Ctrl+Alt+F9** to start and again to stop. A recording starts at the last
+second already in the buffer and is written to disk as it goes, so it can be as long
+as you like without using more memory. Like with clips, the file is named after the
+app on screen and lands in your clips folder.
+
+If the display mode or capture settings change mid-recording (say, a game switches
+resolution with "Keep stretched resolutions stretched" off), the recording is saved
+up to that point.
+</details>
+
+<details>
+<summary><b>Only one audio track plays</b></summary>
+
+That's normal. Players and websites play the first track, which always has
+everything mixed together. The other tracks are for video editors, which show each
+one separately.
+</details>
+
+<details>
 <summary><b>How much memory does it use?</b></summary>
 
 Around 50 MB for the app, plus the replay buffer itself. The buffer is roughly
-bitrate × length: the default 20 Mbps for 60 seconds is about 150 MB. Lower the
+bitrate × length: the default 20 Mbps for 60 seconds is about 150 MB. Recordings go
+straight to disk and don't add to that. Lower the
 bitrate, resolution or replay length to use less. The settings window shows the
 estimate as you change things.
 </details>
@@ -163,7 +223,8 @@ for a minute of 1080p would take around 30 GB; compressed, it's about 150 MB.
 When you press the hotkey, Bufferless copies the buffer into an MP4 file. Nothing
 gets re-encoded, so it takes milliseconds, and the video looks exactly as it did
 when it was recorded. Audio is captured separately and lined up with the video
-using the same clock.
+using the same clock. Recordings use the same encoded video, streamed into a file
+a few times a second instead.
 
 <details>
 <summary><b>Building from source</b></summary>
@@ -174,7 +235,9 @@ You need Windows 10 or 11 and [Rust](https://rustup.rs) with the MSVC toolchain.
 cargo build --release
 ```
 
-That gives you `target\release\bufferless.exe`, the standard build.
+That gives you `target\release\bufferless.exe`, the standard build. `cargo test`
+runs the tests; `cargo test -- --ignored` adds one that needs Windows 11 and an
+audio device.
 
 The smaller two are built with `.\build-tiny.ps1`, which needs a nightly toolchain
 and [UPX](https://upx.github.io/) (`winget install UPX.UPX`). It turns on the
@@ -190,11 +253,13 @@ tag like `v0.2.0` yourself for a bigger jump.
 | --- | --- |
 | `src/capture.rs` | Screen capture, GPU colour conversion, frame timing |
 | `src/encoder.rs` | Hardware H.264 encoder |
-| `src/audio.rs` | System audio and mic capture, mixing, AAC encoding |
+| `src/audio.rs` | System audio, mic and per-app capture, mixing, AAC encoding |
 | `src/ring.rs` | The replay buffer |
 | `src/mux.rs` | MP4 writer |
-| `src/app.rs` | Tray icon, hotkey, saving clips |
+| `src/record.rs` | Recordings, streamed to disk |
+| `src/app.rs` | Tray icon, hotkeys, saving clips |
 | `src/settings.rs` | Settings window |
+| `src/theme.rs` | Light and dark mode |
 | `src/rt.rs` | The tiny runtime used instead of Rust's std |
 | `src/icon.rs` | Draws the app and tray icons |
 </details>

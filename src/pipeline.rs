@@ -9,7 +9,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use crate::rt::Mutex;
 use crate::rt::thread::{self, JoinHandle};
 
-use crate::audio::{self, AudioConfig};
+use crate::audio;
 use crate::capture::{self, VideoConfig};
 use crate::config::Config;
 use crate::ring::Ring;
@@ -22,7 +22,13 @@ pub struct Pipeline {
 
 impl Pipeline {
     pub fn start(cfg: &Config, ring: Arc<Mutex<Ring>>) -> Self {
-        ring.lock().set_keep(cfg.replay_seconds);
+        let audio = cfg.audio_config();
+        let audio_tracks = audio.track_names();
+        {
+            let mut ring = ring.lock();
+            ring.set_keep(cfg.replay_seconds);
+            ring.set_audio_tracks(audio_tracks.clone());
+        }
         let stop = Arc::new(AtomicBool::new(false));
         let status = Arc::new(Mutex::new("Starting...".to_string()));
         let mut threads = Vec::new();
@@ -33,19 +39,14 @@ impl Pipeline {
             bitrate: cfg.bitrate_mbps * 1_000_000,
             height: cfg.resolution,
             cursor: cfg.capture_cursor,
+            keep_stretched: cfg.keep_stretched,
         };
         {
             let (ring, stop, status) = (ring.clone(), stop.clone(), status.clone());
             threads.push(thread::spawn("video", move || capture::run(video, ring, stop, status)));
         }
 
-        if cfg.system_audio || cfg.microphone {
-            let audio = AudioConfig {
-                system: cfg.system_audio,
-                mic: cfg.microphone,
-                mic_device: cfg.microphone_device.clone(),
-                mic_volume: cfg.microphone_volume as f32 / 100.0,
-            };
+        if !audio_tracks.is_empty() {
             let (ring, stop) = (ring.clone(), stop.clone());
             threads.push(thread::spawn("audio", move || audio::run(audio, ring, stop)));
         }

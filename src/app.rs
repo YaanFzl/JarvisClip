@@ -1,4 +1,5 @@
-//! The tray app: hidden window, tray icon, global hotkey, clip saving.
+//! The tray app: hidden window, tray icon, global hotkeys, clip saving and
+//! recordings.
 
 use crate::prelude::*;
 
@@ -16,35 +17,72 @@ use windows::core::{PCWSTR, w};
 
 use crate::config::Config;
 use crate::pipeline::Pipeline;
+use crate::record::{self, Recording};
 use crate::ring::Ring;
 use crate::rt::{self, UiCell, fs, path};
 use crate::util::{copy_wide, hotkey_name, wide};
-use crate::{clock, icon, log, mux, settings, util};
+use crate::{clock, icon, log, mux, settings, theme, util};
 
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_CLIP_SAVED: u32 = WM_APP + 2;
 /// Posted by a second instance to ask us to show settings.
 pub const WM_SHOW_SETTINGS: u32 = WM_APP + 3;
+const WM_RECORDING_SAVED: u32 = WM_APP + 4;
 pub const WINDOW_CLASS: PCWSTR = w!("BufferlessTrayWindow");
 
-const HOTKEY_ID: i32 = 1;
+const HOTKEY_SAVE: i32 = 1;
+const HOTKEY_RECORD: i32 = 2;
 const TIMER_STATUS: usize = 1;
 
 const CMD_SAVE: usize = 100;
 const CMD_OPEN_FOLDER: usize = 101;
 const CMD_SETTINGS: usize = 102;
 const CMD_QUIT: usize = 103;
+const CMD_RECORD: usize = 104;
+
+struct TrayIcons {
+    ok: HICON,
+    error: HICON,
+    recording: HICON,
+}
+
+impl TrayIcons {
+    /// Matched to the taskbar theme: white on a dark taskbar, near-black on a
+    /// light one. Errors dim the mark; recording adds a red dot.
+    fn new() -> Self {
+        let size = unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16) as u32;
+        let rgb = if util::taskbar_is_light() { [0x1f, 0x1f, 0x1f] } else { [0xff, 0xff, 0xff] };
+        Self {
+            ok: util::icon_from_rgba(size, &icon::glyph(size, rgb, 1.0)),
+            error: util::icon_from_rgba(size, &icon::glyph(size, rgb, 0.4)),
+            recording: util::icon_from_rgba(size, &icon::glyph_recording(size, rgb)),
+        }
+    }
+}
+
+impl Drop for TrayIcons {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = DestroyIcon(self.ok);
+            let _ = DestroyIcon(self.error);
+            let _ = DestroyIcon(self.recording);
+        }
+    }
+}
 
 struct App {
     hwnd: HWND,
     cfg: Config,
     ring: Arc<Mutex<Ring>>,
+    /// Dropped before the pipeline, so a recording gets everything up to the
+    /// moment it's stopped.
+    recording: Option<Recording>,
     pipeline: Option<Pipeline>,
-    icon_ok: HICON,
-    icon_error: HICON,
+    icons: TrayIcons,
     showing_error: bool,
     taskbar_created: u32,
     hotkey_ok: bool,
+    record_hotkey_ok: bool,
     last_clip: Option<String>,
 }
 
@@ -52,14 +90,6 @@ static APP: UiCell<RefCell<Option<App>>> = UiCell::new(RefCell::new(None));
 
 fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
     APP.with(|a| a.borrow_mut().as_mut().map(f))
-}
-
-/// Tray icons for the normal and error states, matched to the taskbar theme:
-/// white on a dark taskbar, near-black on a light one. Errors dim the mark.
-fn tray_icons() -> (HICON, HICON) {
-    let size = unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16) as u32;
-    let rgb = if util::taskbar_is_light() { [0x1f, 0x1f, 0x1f] } else { [0xff, 0xff, 0xff] };
-    (util::icon_from_rgba(size, &icon::glyph(size, rgb, 1.0)), util::icon_from_rgba(size, &icon::glyph(size, rgb, 0.4)))
 }
 
 pub fn current_config() -> Config {
@@ -103,18 +133,19 @@ pub fn run(first_run: bool) {
         if first_run {
             let _ = cfg.save();
         }
-        let (icon_ok, icon_error) = tray_icons();
+        theme::set_menu_theme(theme::is_dark(cfg.theme));
         let ring = Arc::new(Mutex::new(Ring::new(cfg.replay_seconds)));
         let pipeline = Pipeline::start(&cfg, ring.clone());
         let app = App {
             hwnd,
             ring,
+            recording: None,
             pipeline: Some(pipeline),
-            icon_ok,
-            icon_error,
+            icons: TrayIcons::new(),
             showing_error: false,
             taskbar_created: RegisterWindowMessageW(w!("TaskbarCreated")),
             hotkey_ok: false,
+            record_hotkey_ok: false,
             last_clip: None,
             cfg,
         };
@@ -122,7 +153,7 @@ pub fn run(first_run: bool) {
 
         with_app(|a| {
             a.add_tray_icon();
-            a.register_hotkey();
+            a.register_hotkeys();
             if first_run && a.hotkey_ok {
                 a.notify(
                     "Bufferless is running",
@@ -147,9 +178,13 @@ pub fn run(first_run: bool) {
             DispatchMessageW(&msg);
         }
 
-        // Dropping the app stops the pipeline and joins its threads.
+        // Dropping the app finishes any recording, then stops the pipeline
+        // and joins its threads.
         if let Some(app) = APP.with(|a| a.borrow_mut().take()) {
             app.remove_tray_icon();
+            if app.recording.is_some() {
+                log!("finishing the recording before quitting");
+            }
         }
     }
 }
@@ -159,11 +194,21 @@ impl App {
         NOTIFYICONDATAW { cbSize: size_of::<NOTIFYICONDATAW>() as u32, hWnd: self.hwnd, uID: 1, ..Default::default() }
     }
 
+    fn current_icon(&self) -> HICON {
+        if self.recording.is_some() {
+            self.icons.recording
+        } else if self.showing_error {
+            self.icons.error
+        } else {
+            self.icons.ok
+        }
+    }
+
     fn add_tray_icon(&self) {
         let mut nid = self.tray_data();
         nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP;
         nid.uCallbackMessage = WM_TRAY;
-        nid.hIcon = if self.showing_error { self.icon_error } else { self.icon_ok };
+        nid.hIcon = self.current_icon();
         copy_wide(&mut nid.szTip, &self.tooltip());
         nid.Anonymous.uVersion = NOTIFYICON_VERSION_4;
         unsafe {
@@ -187,7 +232,13 @@ impl App {
         // The ring keeps a few extra seconds so clips can start on a keyframe,
         // but a clip is never longer than the replay length.
         let buffered = buffered.min(self.cfg.replay_seconds);
-        format!("Bufferless\n{status}\n{buffered}s of {}s buffered ({} MB)", self.cfg.replay_seconds, bytes / 1_000_000)
+        let mut tip =
+            format!("Bufferless\n{status}\n{buffered}s of {}s buffered ({} MB)", self.cfg.replay_seconds, bytes / 1_000_000);
+        if let Some(r) = &self.recording {
+            let s = r.seconds();
+            tip = format!("{tip}\nRecording to a file: {}:{:02}", s / 60, s % 60);
+        }
+        tip
     }
 
     fn refresh_tray(&mut self) {
@@ -195,7 +246,7 @@ impl App {
         self.showing_error = status.contains("error");
         let mut nid = self.tray_data();
         nid.uFlags = NIF_ICON | NIF_TIP | NIF_SHOWTIP;
-        nid.hIcon = if self.showing_error { self.icon_error } else { self.icon_ok };
+        nid.hIcon = self.current_icon();
         copy_wide(&mut nid.szTip, &self.tooltip());
         unsafe {
             let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
@@ -213,18 +264,35 @@ impl App {
         }
     }
 
-    fn register_hotkey(&mut self) {
-        unsafe {
-            let _ = UnregisterHotKey(Some(self.hwnd), HOTKEY_ID);
-            let mods = HOT_KEY_MODIFIERS(self.cfg.hotkey_modifiers) | MOD_NOREPEAT;
-            self.hotkey_ok = RegisterHotKey(Some(self.hwnd), HOTKEY_ID, mods, self.cfg.hotkey_key).is_ok();
+    /// Notifications for things going as planned, which can be turned off.
+    /// Problems are always shown.
+    fn notify_success(&self, title: &str, text: &str) {
+        if self.cfg.notifications {
+            self.notify(title, text);
         }
+    }
+
+    fn register_hotkeys(&mut self) {
+        let register = |id: i32, modifiers: u32, key: u32| unsafe {
+            let _ = UnregisterHotKey(Some(self.hwnd), id);
+            key == 0 || RegisterHotKey(Some(self.hwnd), id, HOT_KEY_MODIFIERS(modifiers) | MOD_NOREPEAT, key).is_ok()
+        };
+        self.hotkey_ok = register(HOTKEY_SAVE, self.cfg.hotkey_modifiers, self.cfg.hotkey_key);
+        self.record_hotkey_ok = register(HOTKEY_RECORD, self.cfg.record_hotkey_modifiers, self.cfg.record_hotkey_key);
+        let mut taken = Vec::new();
         if !self.hotkey_ok {
-            let name = hotkey_name(self.cfg.hotkey_modifiers, self.cfg.hotkey_key);
-            log!("hotkey {name} is taken");
+            taken.push(hotkey_name(self.cfg.hotkey_modifiers, self.cfg.hotkey_key));
+        }
+        if !self.record_hotkey_ok {
+            taken.push(hotkey_name(self.cfg.record_hotkey_modifiers, self.cfg.record_hotkey_key));
+        }
+        if !taken.is_empty() {
+            let names = taken.join(" and ");
+            log!("hotkey {names} is taken");
+            let verb = if taken.len() > 1 { "are" } else { "is" };
             self.notify(
                 "Hotkey unavailable",
-                &format!("{name} is already used by another app. Pick a different one in Settings."),
+                &format!("{names} {verb} already used by another app. Pick a different one in Settings."),
             );
         }
     }
@@ -240,36 +308,32 @@ impl App {
         let hwnd = self.hwnd.0 as usize;
         rt::thread::spawn("save", move || {
             let start = clock::now();
-            // Two saves within the same second shouldn't overwrite each other.
-            let path = (1..)
-                .map(|n| path::join(&folder, &if n == 1 { format!("{stem}.mp4") } else { format!("{stem} ({n}).mp4") }))
-                .find(|p| !fs::exists(p))
-                .unwrap();
             let result = fs::create_dir_all(&folder)
-                .and_then(|_| mux::write_mp4(&path, &clip))
-                .map(|size| (path, size))
+                .and_then(|_| {
+                    // Two saves within the same second shouldn't overwrite each other.
+                    let path = record::unused_path(&folder, &stem);
+                    mux::write_mp4(&path, &clip).map(|size| (path, size))
+                })
                 .map_err(|e| e.to_string());
             match &result {
                 Ok((p, size)) => log!("saved {p} ({size} bytes) in {} ms", (clock::now() - start) / 10_000),
                 Err(e) => log!("save failed: {e}"),
             }
-            let boxed = Box::into_raw(Box::new(result));
-            unsafe {
-                let _ = PostMessageW(Some(HWND(hwnd as _)), WM_CLIP_SAVED, WPARAM(0), LPARAM(boxed as isize));
-            }
+            post_result(hwnd, WM_CLIP_SAVED, result);
         });
+    }
+
+    fn play_saved_sound(&self) {
+        if self.cfg.save_sound {
+            util::play_saved_sound(&self.cfg.save_sound_file);
+        }
     }
 
     fn on_clip_saved(&mut self, result: Result<(String, u64), String>) {
         match result {
             Ok((path, size)) => {
-                if self.cfg.save_sound {
-                    util::play_saved_sound();
-                }
-                let name = path::file_name(&path).to_string();
-                // Integer math on purpose: float formatting costs ~5 KB in the tiny build.
-                let tenths = (size + 50_000) / 100_000;
-                self.notify("Clip saved", &format!("{name} ({}.{} MB)", tenths / 10, tenths % 10));
+                self.play_saved_sound();
+                self.notify_success("Clip saved", &format!("{} ({})", path::file_name(&path), megabytes(size)));
                 self.last_clip = Some(path);
             }
             Err(e) => {
@@ -277,6 +341,77 @@ impl App {
                 self.notify("Couldn't save clip", &e);
             }
         }
+    }
+
+    fn toggle_recording(&mut self) {
+        match &self.recording {
+            Some(r) if r.stopping() => {} // still finishing the file
+            Some(r) => {
+                log!("recording stopping");
+                r.stop();
+            }
+            None => self.start_recording(),
+        }
+        self.refresh_tray();
+    }
+
+    fn start_recording(&mut self) {
+        let folder = self.cfg.save_folder.clone();
+        if let Err(e) = fs::create_dir_all(&folder) {
+            util::play_error_sound();
+            self.notify("Couldn't start recording", &e.to_string());
+            return;
+        }
+        let stem = format!("{} {}", util::foreground_app_name(), util::timestamp());
+        let path = record::unused_path(&folder, &stem);
+        let hwnd = self.hwnd.0 as usize;
+        self.recording =
+            Some(Recording::start(self.ring.clone(), path, move |outcome| post_result(hwnd, WM_RECORDING_SAVED, outcome)));
+        if self.cfg.save_sound {
+            util::play_recording_sound();
+        }
+        let key = hotkey_name(self.cfg.record_hotkey_modifiers, self.cfg.record_hotkey_key);
+        let how = if self.cfg.record_hotkey_key != 0 { format!("Press {key} again") } else { "Use the tray menu".into() };
+        self.notify_success("Recording", &format!("{how} to stop and save it."));
+    }
+
+    fn on_recording_saved(&mut self, outcome: record::Outcome) {
+        // The thread is done, so this doesn't block.
+        self.recording = None;
+        match outcome {
+            Ok(saved) => {
+                self.play_saved_sound();
+                let (m, s) = (saved.seconds / 60, saved.seconds % 60);
+                let summary = format!("{} ({m}:{s:02}, {})", path::file_name(&saved.path), megabytes(saved.size));
+                if saved.cut_short {
+                    // Always worth knowing about, even with notifications off.
+                    self.notify("Recording stopped", &format!("The display or capture settings changed. {summary}"));
+                } else {
+                    self.notify_success("Recording saved", &summary);
+                }
+                self.last_clip = Some(saved.path);
+            }
+            Err(e) => {
+                util::play_error_sound();
+                self.notify("Couldn't save the recording", &e);
+            }
+        }
+        self.refresh_tray();
+    }
+}
+
+/// "12.3 MB". Integer math on purpose: float formatting costs ~5 KB in the
+/// tiny build.
+fn megabytes(bytes: u64) -> String {
+    let tenths = (bytes + 50_000) / 100_000;
+    format!("{}.{} MB", tenths / 10, tenths % 10)
+}
+
+/// Hand a result from a worker thread to the UI thread.
+fn post_result<T: 'static>(hwnd: usize, msg: u32, result: T) {
+    let boxed = Box::into_raw(Box::new(result));
+    unsafe {
+        let _ = PostMessageW(Some(HWND(hwnd as _)), msg, WPARAM(0), LPARAM(boxed as isize));
     }
 }
 
@@ -302,18 +437,25 @@ impl App {
         }
         if old.capture_settings_differ(&self.cfg) {
             log!("capture settings changed, restarting pipeline");
+            // The recording keeps what it has so far and ends there.
+            if let Some(r) = &self.recording {
+                r.stop();
+            }
             self.pipeline = None; // joins the old threads first
             self.ring.lock().clear();
             self.pipeline = Some(Pipeline::start(&self.cfg, self.ring.clone()));
         } else if old.replay_seconds != self.cfg.replay_seconds {
             self.ring.lock().set_keep(self.cfg.replay_seconds);
         }
-        if (old.hotkey_modifiers, old.hotkey_key) != (self.cfg.hotkey_modifiers, self.cfg.hotkey_key) || !self.hotkey_ok
-        {
-            self.register_hotkey();
+        let hotkeys = |c: &Config| (c.hotkey_modifiers, c.hotkey_key, c.record_hotkey_modifiers, c.record_hotkey_key);
+        if hotkeys(&old) != hotkeys(&self.cfg) || !self.hotkey_ok || !self.record_hotkey_ok {
+            self.register_hotkeys();
         }
         if old.start_with_windows != self.cfg.start_with_windows {
             util::set_autostart(self.cfg.start_with_windows);
+        }
+        if old.theme != self.cfg.theme {
+            theme::set_menu_theme(theme::is_dark(self.cfg.theme));
         }
         self.refresh_tray();
     }
@@ -329,6 +471,9 @@ fn handle_command(cmd: usize) {
         CMD_SAVE => {
             with_app(|a| a.save_clip());
         }
+        CMD_RECORD => {
+            with_app(|a| a.toggle_recording());
+        }
         CMD_OPEN_FOLDER => {
             if let Some(folder) = with_app(|a| a.cfg.save_folder.clone()) {
                 open_folder(&folder, None);
@@ -342,8 +487,12 @@ fn handle_command(cmd: usize) {
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
-        WM_HOTKEY if wparam.0 as i32 == HOTKEY_ID => {
+        WM_HOTKEY if wparam.0 as i32 == HOTKEY_SAVE => {
             with_app(|a| a.save_clip());
+            LRESULT(0)
+        }
+        WM_HOTKEY if wparam.0 as i32 == HOTKEY_RECORD => {
+            with_app(|a| a.toggle_recording());
             LRESULT(0)
         }
         WM_TRAY => {
@@ -352,8 +501,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 WM_CONTEXTMENU => {
                     // The menu runs a modal loop that dispatches messages back
                     // into this wndproc, so the app must not be borrowed meanwhile.
-                    if let Some((hwnd, cfg)) = with_app(|a| (a.hwnd, a.cfg.clone())) {
-                        handle_command(show_menu(hwnd, &cfg));
+                    if let Some((hwnd, cfg, recording)) =
+                        with_app(|a| (a.hwnd, a.cfg.clone(), a.recording.as_ref().map(|r| r.stopping())))
+                    {
+                        handle_command(show_menu(hwnd, &cfg, recording));
                     }
                 }
                 WM_LBUTTONDBLCLK => settings::open(current_config()),
@@ -371,6 +522,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             with_app(|a| a.on_clip_saved(*result));
             LRESULT(0)
         }
+        WM_RECORDING_SAVED => {
+            let outcome = unsafe { Box::from_raw(lparam.0 as *mut record::Outcome) };
+            with_app(|a| a.on_recording_saved(*outcome));
+            LRESULT(0)
+        }
         WM_SHOW_SETTINGS => {
             settings::open(current_config());
             LRESULT(0)
@@ -382,12 +538,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_SETTINGCHANGE => {
             // Light/dark switches arrive as "ImmersiveColorSet"; just redraw.
             with_app(|a| {
-                let (ok, error) = tray_icons();
-                unsafe {
-                    let _ = DestroyIcon(a.icon_ok);
-                    let _ = DestroyIcon(a.icon_error);
-                }
-                (a.icon_ok, a.icon_error) = (ok, error);
+                a.icons = TrayIcons::new();
+                theme::set_menu_theme(theme::is_dark(a.cfg.theme));
                 a.refresh_tray();
             });
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
@@ -407,23 +559,33 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     }
 }
 
-fn show_menu(hwnd: HWND, cfg: &Config) -> usize {
+/// `recording`: None when idle, Some(stopping) while recording.
+fn show_menu(hwnd: HWND, cfg: &Config, recording: Option<bool>) -> usize {
     unsafe {
         let menu = CreatePopupMenu().unwrap();
-        let save_label = format!("Save clip	{}", hotkey_name(cfg.hotkey_modifiers, cfg.hotkey_key));
+        let with_key = |label: &str, modifiers: u32, key: u32| {
+            if key == 0 { label.to_string() } else { format!("{label}\t{}", hotkey_name(modifiers, key)) }
+        };
+        let save_label = with_key("Save clip", cfg.hotkey_modifiers, cfg.hotkey_key);
+        let (record_label, record_flags) = match recording {
+            None => (with_key("Start recording", cfg.record_hotkey_modifiers, cfg.record_hotkey_key), MF_STRING),
+            Some(false) => (with_key("Stop recording", cfg.record_hotkey_modifiers, cfg.record_hotkey_key), MF_STRING),
+            Some(true) => ("Saving recording...".to_string(), MF_STRING | MF_GRAYED),
+        };
         let items = [
-            (CMD_SAVE, save_label.as_str()),
-            (CMD_OPEN_FOLDER, "Open clips folder"),
-            (CMD_SETTINGS, "Settings..."),
-            (0, ""),
-            (CMD_QUIT, "Quit"),
+            (CMD_SAVE, save_label.as_str(), MF_STRING),
+            (CMD_RECORD, record_label.as_str(), record_flags),
+            (CMD_OPEN_FOLDER, "Open clips folder", MF_STRING),
+            (CMD_SETTINGS, "Settings...", MF_STRING),
+            (0, "", MF_SEPARATOR),
+            (CMD_QUIT, "Quit", MF_STRING),
         ];
-        for (id, label) in items {
+        for (id, label, flags) in items {
             if id == 0 {
-                let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+                let _ = AppendMenuW(menu, flags, 0, None);
             } else {
                 let text = wide(label);
-                let _ = AppendMenuW(menu, MF_STRING, id, PCWSTR(text.as_ptr()));
+                let _ = AppendMenuW(menu, flags, id, PCWSTR(text.as_ptr()));
             }
         }
         let _ = SetMenuDefaultItem(menu, CMD_SAVE as u32, 0);
