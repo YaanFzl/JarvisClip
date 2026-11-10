@@ -1,5 +1,6 @@
 <p align="center">
-  <img src="docs/banner.svg" alt="jarvis clip: say &quot;jarvis clip that&quot; and the last 30 seconds are saved" width="100%">
+  <a href="docs/demo.mp4"><img src="docs/demo.gif" alt="Jarvis Clip in 20 seconds: say &quot;jarvis clip that&quot;, the clip is saved, the control window, the voice feed and the clip library." width="100%"></a>
+  <br><sub>Muted preview. <a href="docs/demo.mp4">Watch it with sound</a>.</sub>
 </p>
 
 <p align="center">
