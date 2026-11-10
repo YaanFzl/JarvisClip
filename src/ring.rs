@@ -68,6 +68,29 @@ pub struct Recorded {
     /// The video format changed or the buffer was reset, so nothing more can
     /// go into the same file.
     pub ended: bool,
+    /// Some packets couldn't be read back from the spool files. The batch is
+    /// empty then: writing what's left would leave silent gaps in the file.
+    pub unreadable: bool,
+}
+
+/// What `take_recorded` hands over, still where the ring keeps it. `load`
+/// reads it in; call it without the ring locked, since that can mean disk I/O.
+pub struct Pending {
+    format: Option<VideoFormat>,
+    video: Vec<Arc<Slot>>,
+    audio: Vec<(usize, Arc<Slot>)>,
+    ended: bool,
+}
+
+impl Pending {
+    pub fn load(self) -> Recorded {
+        let video = self.video.iter().map(|s| s.packet()).collect::<Option<Vec<_>>>();
+        let audio = self.audio.iter().map(|(t, s)| Some((*t, s.packet()?))).collect::<Option<Vec<_>>>();
+        match (video, audio) {
+            (Some(video), Some(audio)) => Recorded { format: self.format, video, audio, ended: self.ended, unreadable: false },
+            _ => Recorded { unreadable: true, ..Default::default() },
+        }
+    }
 }
 
 /// The ring's own queue for a recording, before the data is read back.
@@ -108,7 +131,12 @@ impl Slot {
 /// when the last slot in it is dropped, and also if the app exits or crashes.
 pub struct Spool(std::fs::File);
 
+/// Spool file numbers, unique for the whole process: a new `Spooler` in a
+/// folder used before must not reuse the name of a file old slots still read.
+static SPOOL_IDS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 impl Spool {
+    /// Never opens an existing file, so live spool data can't be truncated.
     fn create(path: &str) -> std::io::Result<Self> {
         use std::os::windows::fs::OpenOptionsExt;
         const FILE_ATTRIBUTE_TEMPORARY: u32 = 0x100;
@@ -116,8 +144,7 @@ impl Spool {
         std::fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .attributes(FILE_ATTRIBUTE_TEMPORARY)
             .custom_flags(FILE_FLAG_DELETE_ON_CLOSE)
             .open(path)
@@ -162,14 +189,13 @@ struct Spooler {
     dir: String,
     /// The file being appended to, its length, and its first packet's pts.
     current: Option<(Arc<Spool>, u64, i64)>,
-    next_id: u64,
 }
 
 impl Spooler {
     fn write(&mut self, pts: i64, data: &[u8]) -> std::io::Result<(Arc<Spool>, u64)> {
         if self.current.as_ref().is_none_or(|(_, _, first)| pts - first >= SPOOL_FILE_SECONDS * SECOND) {
-            self.next_id += 1;
-            let file = path::join(&self.dir, &format!("spool-{}.bin", self.next_id));
+            let id = SPOOL_IDS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
+            let file = path::join(&self.dir, &format!("spool-{}-{id}.bin", std::process::id()));
             self.current = Some((Arc::new(Spool::create(&file)?), 0, pts));
         }
         let (spool, len, _) = self.current.as_mut().unwrap();
@@ -214,10 +240,16 @@ impl Ring {
         match fs::create_dir_all(dir) {
             Ok(()) => {
                 log!("replay buffer on disk in {dir}");
-                self.spooler = Some(Spooler { dir: dir.into(), current: None, next_id: 0 });
+                self.spooler = Some(Spooler { dir: dir.into(), current: None });
             }
             Err(e) => log!("can't use {dir} for the replay buffer ({e}), keeping it in memory"),
         }
+    }
+
+    /// Whether new packets really go to disk. False after a disk error, even
+    /// with a buffer folder set.
+    pub fn spooling(&self) -> bool {
+        self.spooler.is_some()
     }
 
     pub fn set_keep(&mut self, seconds: u32) {
@@ -384,18 +416,13 @@ impl Ring {
         self.recording = Some(r);
     }
 
-    /// Hand over the packets queued since the last call.
-    pub fn take_recorded(&mut self) -> Recorded {
+    /// Hand over the packets queued since the last call. Cheap: the data is
+    /// read in by `Pending::load`, after the ring is unlocked.
+    pub fn take_recorded(&mut self) -> Pending {
         let format = self.format.clone();
         match self.recording.as_mut() {
-            Some(r) => {
-                // A packet that can't be read back is skipped rather than
-                // ending the whole recording.
-                let video = core::mem::take(&mut r.video).iter().filter_map(|s| s.packet()).collect();
-                let audio = core::mem::take(&mut r.audio).iter().filter_map(|(t, s)| Some((*t, s.packet()?))).collect();
-                Recorded { format, video, audio, ended: r.ended }
-            }
-            None => Recorded { ended: true, ..Default::default() },
+            Some(r) => Pending { format, video: core::mem::take(&mut r.video), audio: core::mem::take(&mut r.audio), ended: r.ended },
+            None => Pending { format, video: Vec::new(), audio: Vec::new(), ended: true },
         }
     }
 
@@ -447,20 +474,20 @@ mod tests {
         ring.push_video(Packet { pts: 3 * SECOND, key: true, data: vec![0; 100] });
         ring.push_video(Packet { pts: 3 * SECOND + SECOND / 10, key: false, data: vec![0; 100] });
         ring.start_recording();
-        let first = ring.take_recorded();
+        let first = ring.take_recorded().load();
         assert_eq!(first.video.len(), 2);
         assert!(first.video[0].key && first.video[0].pts == 3 * SECOND);
         assert!(!first.ended);
 
         // Much longer than the replay length: nothing is lost to trimming.
         fill(&mut ring, 4, 30);
-        let rest = ring.take_recorded();
+        let rest = ring.take_recorded().load();
         assert_eq!(rest.video.len(), 300);
         assert_eq!(rest.audio.len(), 300);
-        assert!(ring.take_recorded().video.is_empty());
+        assert!(ring.take_recorded().load().video.is_empty());
 
         ring.clear();
-        assert!(ring.take_recorded().ended);
+        assert!(ring.take_recorded().load().ended);
     }
 
     #[test]
@@ -488,5 +515,32 @@ mod tests {
         ring.clear();
         ring.spooler = None; // closes the file still being written
         assert_eq!(files(), 0);
+    }
+
+    #[test]
+    fn respooling_to_the_same_folder_keeps_old_footage_readable() {
+        let dir = std::env::temp_dir().join("jarvis-ring-respool").to_string_lossy().into_owned();
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut ring = ring(30);
+        ring.set_format(VideoFormat { width: 2, height: 2, fps: 10, seq_header: Vec::new() });
+        let push = |ring: &mut Ring, from: i64, to: i64| {
+            for i in from..to {
+                ring.push_video(Packet { pts: i * SECOND / 10, key: i % 10 == 0, data: (i as u32).to_le_bytes().repeat(25) });
+            }
+        };
+        // Disk, then RAM, then the same folder again (the control window's
+        // Disk/RAM switch): the new files must not overwrite the old ones.
+        ring.set_spool(&dir);
+        push(&mut ring, 0, 100);
+        ring.set_spool("");
+        push(&mut ring, 100, 120);
+        ring.set_spool(&dir);
+        assert!(ring.spooling());
+        push(&mut ring, 120, 220);
+        let clip = ring.snapshot(30).unwrap().load().unwrap();
+        assert_eq!(clip.video.len(), 220);
+        for p in &clip.video {
+            assert_eq!(p.data, ((p.pts * 10 / SECOND) as u32).to_le_bytes().repeat(25));
+        }
     }
 }

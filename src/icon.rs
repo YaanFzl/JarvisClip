@@ -1,4 +1,4 @@
-//! The Bufferless mark ("afterimage": a circle trailed by two fading echoes),
+//! The app mark ("afterimage": a circle trailed by two fading echoes),
 //! rasterized in software. Shared by build.rs, which bakes the exe icon, and
 //! the app, which draws the tray icon at runtime. Geometry is in a 64x64 space.
 

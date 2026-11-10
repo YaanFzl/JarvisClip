@@ -279,25 +279,33 @@ fn take_string(value: &str) -> Option<(String, &str)> {
         return Some((inner[..end].to_string(), &inner[end + 1..]));
     }
     let inner = value.strip_prefix('"')?;
-    let mut out = String::with_capacity(inner.len());
-    let mut chars = inner.char_indices();
-    while let Some((i, c)) = chars.next() {
-        match c {
-            '"' => return Some((out, &inner[i + 1..])),
-            '\\' => match chars.next()?.1 {
-                'n' => out.push('\n'),
-                't' => out.push('\t'),
-                c @ ('\\' | '"') => out.push(c),
-                // Not an escape: a hand-typed path like "D:\ML\clips".
-                other => {
-                    out.push('\\');
-                    out.push(other);
-                }
-            },
-            _ => out.push(c),
+    // Find the closing quote. `to_toml` doubles every backslash, so a lone one
+    // (not before `\` or `"`) means a hand-typed Windows path like
+    // "D:\games\new clips" or "\\nas\clips": that string is kept as typed.
+    let bytes = inner.as_bytes();
+    let (mut i, mut hand_typed) = (0, false);
+    while bytes.get(i)? != &b'"' {
+        if bytes[i] == b'\\' {
+            if matches!(bytes.get(i + 1), Some(b'\\' | b'"')) {
+                i += 1;
+            } else {
+                hand_typed = true;
+            }
         }
+        i += 1;
     }
-    None
+    let raw = &inner[..i];
+    let out = if hand_typed {
+        raw.replace("\\\"", "\"")
+    } else {
+        let mut out = String::with_capacity(raw.len());
+        let mut chars = raw.chars();
+        while let Some(c) = chars.next() {
+            out.push(if c == '\\' { chars.next()? } else { c });
+        }
+        out
+    };
+    Some((out, &inner[i + 1..]))
 }
 
 /// A one-line TOML array of strings: `["a", 'b']`.
@@ -357,6 +365,16 @@ fps = nope
         let mut cfg = Config::default();
         cfg.parse(r#"buffer_folder = "D:\ML\jarvis-clip\buffer""#);
         assert_eq!(cfg.buffer_folder, r"D:\ML\jarvis-clip\buffer");
+        // \n, \t and \\ in a hand-typed path are not escapes.
+        cfg.parse(r#"save_folder = "D:\games\new clips""#);
+        assert_eq!(cfg.save_folder, r"D:\games\new clips");
+        cfg.parse(r#"buffer_folder = "E:\temp""#);
+        assert_eq!(cfg.buffer_folder, r"E:\temp");
+        cfg.parse(r#"save_folder = "\\nas\clips""#);
+        assert_eq!(cfg.save_folder, r"\\nas\clips");
+        // Written by to_toml: every backslash doubled.
+        cfg.parse(r#"save_folder = "\\\\nas\\clips""#);
+        assert_eq!(cfg.save_folder, r"\\nas\clips");
     }
 
     #[test]

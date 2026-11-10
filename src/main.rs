@@ -1,11 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-// The `nostd` feature drops Rust's std (and, in build-tiny.ps1, the C
-// runtime too): see rt.rs. Default builds and tests use std as usual; the
-// code goes through rt's small wrappers either way.
-#![cfg_attr(all(feature = "nostd", not(test)), no_std, no_main)]
 
-// Without std, format!/vec! come from alloc.
-#[cfg_attr(all(feature = "nostd", not(test)), macro_use)]
 extern crate alloc;
 
 mod app;
@@ -40,9 +34,9 @@ use windows::core::w;
 
 use config::Config;
 
-/// CI sets BUFFERLESS_VERSION to the release being built (Cargo.toml's
+/// CI sets JARVIS_CLIP_VERSION to the release being built (Cargo.toml's
 /// version isn't bumped for every automatic release).
-pub const VERSION: &str = match option_env!("BUFFERLESS_VERSION") {
+pub const VERSION: &str = match option_env!("JARVIS_CLIP_VERSION") {
     Some(v) => v,
     None => env!("CARGO_PKG_VERSION"),
 };

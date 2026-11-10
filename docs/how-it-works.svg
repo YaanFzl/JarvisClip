@@ -1,50 +1,60 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 420" width="1200" height="420" role="img" aria-labelledby="title desc">
-  <title id="title">How Bufferless works</title>
-  <desc id="desc">The screen is captured with Desktop Duplication and encoded on the GPU. System audio and the microphone are encoded to AAC. Both go into a replay buffer in RAM that holds already-encoded video. Pressing the hotkey writes the buffer to an MP4 file in about 10 milliseconds, without re-encoding.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 460" width="1200" height="460" role="img" aria-labelledby="title desc">
+  <title id="title">How Jarvis Clip works</title>
+  <desc id="desc">The screen is captured with Desktop Duplication and encoded on the GPU. System audio and the microphone are encoded to AAC. Both go into a replay buffer of already-encoded video, kept in temp files on disk. The microphone also feeds Vosk, an offline recognizer that listens only for the Jarvis phrases. A voice command or the hotkey writes the buffer to an MP4 file without re-encoding.</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0 0 10 5 0 10z" fill="#8a86a3"/>
+      <path d="M0 0 10 5 0 10z" fill="#7d8a96"/>
+    </marker>
+    <marker id="arrow-arc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 10 5 0 10z" fill="#7dd3fc"/>
     </marker>
   </defs>
-  <rect width="1200" height="420" rx="28" fill="#15141c"/>
+  <rect width="1200" height="460" rx="28" fill="#0b0d10"/>
   <g font-family="Segoe UI, system-ui, -apple-system, sans-serif">
     <!-- nodes -->
     <g stroke-width="1.5">
-      <rect x="40" y="70" width="210" height="92" rx="16" fill="#1d1c26" stroke="#34313f"/>
-      <rect x="300" y="70" width="250" height="92" rx="16" fill="#1d1c26" stroke="#34313f"/>
-      <rect x="300" y="250" width="250" height="92" rx="16" fill="#1d1c26" stroke="#34313f"/>
-      <rect x="610" y="70" width="250" height="92" rx="16" fill="#2a2550" stroke="#6a5ae0"/>
-      <rect x="950" y="70" width="210" height="92" rx="16" fill="#1d1c26" stroke="#34313f"/>
+      <rect x="40" y="70" width="210" height="92" rx="16" fill="#13161b" stroke="#252b33"/>
+      <rect x="300" y="70" width="250" height="92" rx="16" fill="#13161b" stroke="#252b33"/>
+      <rect x="300" y="250" width="250" height="92" rx="16" fill="#13161b" stroke="#252b33"/>
+      <rect x="610" y="70" width="250" height="92" rx="16" fill="#0f2633" stroke="#38bdf8"/>
+      <rect x="610" y="250" width="250" height="92" rx="16" fill="#13161b" stroke="#252b33"/>
+      <rect x="950" y="70" width="210" height="92" rx="16" fill="#13161b" stroke="#252b33"/>
     </g>
-    <g font-size="22" font-weight="700" fill="#fff" text-anchor="middle">
+    <g font-size="22" font-weight="700" fill="#f4f6f8" text-anchor="middle">
       <text x="145" y="110">Your screen</text>
       <text x="425" y="110">GPU encoder</text>
       <text x="425" y="290">System audio + mic</text>
       <text x="735" y="110">Replay buffer</text>
+      <text x="735" y="290">Vosk</text>
       <text x="1055" y="110">MP4 clip</text>
     </g>
-    <g font-size="16" fill="#a9a6bd" text-anchor="middle">
+    <g font-size="16" fill="#9fb3c2" text-anchor="middle">
       <text x="145" y="137">Desktop Duplication</text>
       <text x="425" y="137">NVENC · AMF · QuickSync</text>
       <text x="425" y="317">WASAPI → AAC encoder</text>
-      <text x="735" y="137" fill="#cfc9f5">in RAM, already encoded</text>
-      <text x="1055" y="137">written in ~10 ms</text>
+      <text x="735" y="137" fill="#bfe6fb">on disk, already encoded</text>
+      <text x="735" y="317">offline, listens for "jarvis …"</text>
+      <text x="1055" y="137">no re-encoding</text>
     </g>
     <!-- arrows -->
-    <g stroke="#8a86a3" stroke-width="2.5" fill="none" marker-end="url(#arrow)">
+    <g stroke="#7d8a96" stroke-width="2.5" fill="none" marker-end="url(#arrow)">
       <path d="M252 116h44"/>
       <path d="M552 116h54"/>
-      <path d="M552 296h48q40 0 40-40v-90"/>
+      <path d="M552 280h18q20 0 20-20v-74q0-20 18-20"/>
+      <path d="M552 312h54"/>
       <path d="M862 116h84"/>
     </g>
-    <rect x="868" y="78" width="72" height="26" rx="7" fill="#6a5ae0"/>
-    <text x="904" y="96" font-size="14" font-weight="600" fill="#fff" text-anchor="middle">hotkey</text>
+    <path d="M862 296h40q40 0 40-40v-80" stroke="#7dd3fc" stroke-width="2.5" fill="none" stroke-dasharray="6 6" marker-end="url(#arrow-arc)"/>
+    <rect x="868" y="78" width="72" height="26" rx="7" fill="#7dd3fc"/>
+    <text x="904" y="96" font-size="14" font-weight="600" fill="#05202c" text-anchor="middle">save</text>
+    <text x="952" y="230" font-size="15" fill="#7dd3fc">"jarvis clip that"</text>
+    <text x="952" y="251" font-size="15" fill="#7d8a96">or Alt+F10</text>
     <!-- notes -->
-    <g font-size="15" fill="#8a86a3">
+    <g font-size="15" fill="#7d8a96">
       <text x="145" y="190" text-anchor="middle">frames never leave the GPU</text>
-      <text x="775" y="190" text-anchor="middle">oldest seconds drop off</text>
-      <text x="775" y="211" text-anchor="middle">as new ones arrive</text>
+      <text x="735" y="190" text-anchor="middle">5-second temp files that delete</text>
+      <text x="735" y="211" text-anchor="middle">themselves as they age out</text>
     </g>
-    <text x="600" y="388" font-size="17" fill="#cfcbe0" text-anchor="middle">Saving never re-encodes anything. The buffer already holds finished video, so a clip is just copied out.</text>
+    <text x="600" y="420" font-size="17" fill="#c9d3dc" text-anchor="middle">Saving never re-encodes anything. The buffer already holds finished video, so a clip is just copied out.</text>
   </g>
 </svg>

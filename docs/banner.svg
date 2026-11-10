@@ -1,23 +1,28 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 380" width="1200" height="380" role="img" aria-labelledby="title desc">
-  <title id="title">Bufferless</title>
-  <desc id="desc">The Bufferless logo, a circle trailed by two fading echoes on an indigo tile, next to the tagline: your last 60 seconds, one hotkey away.</desc>
+  <title id="title">Jarvis Clip</title>
+  <desc id="desc">The Jarvis Clip logo, a circle trailed by two fading echoes, next to the tagline: say "jarvis clip that" and the last 30 seconds are saved.</desc>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#1d1a33"/>
-      <stop offset="1" stop-color="#0e0d14"/>
+      <stop offset="0" stop-color="#0d1a24"/>
+      <stop offset="1" stop-color="#050506"/>
     </linearGradient>
     <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#6a5ae0"/>
       <stop offset="1" stop-color="#1e1a4a"/>
     </linearGradient>
+    <radialGradient id="glow">
+      <stop offset="0" stop-color="#38bdf8" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#38bdf8" stop-opacity="0"/>
+    </radialGradient>
     <clipPath id="card"><rect width="1200" height="380" rx="28"/></clipPath>
   </defs>
   <rect width="1200" height="380" rx="28" fill="url(#bg)"/>
-  <!-- the mark, huge and faint, bleeding off the right edge -->
-  <g clip-path="url(#card)" fill="#fff">
-    <circle cx="1080" cy="190" r="130" opacity="0.02"/>
-    <circle cx="1150" cy="190" r="150" opacity="0.03"/>
-    <circle cx="1240" cy="190" r="170" opacity="0.045"/>
+  <!-- arc-reactor rings, faint, bleeding off the right edge -->
+  <g clip-path="url(#card)" fill="none" stroke="#7dd3fc">
+    <circle cx="1110" cy="190" r="70" fill="url(#glow)" stroke="none"/>
+    <circle cx="1110" cy="190" r="70" stroke-opacity="0.18" stroke-width="2"/>
+    <circle cx="1110" cy="190" r="120" stroke-opacity="0.10" stroke-width="2" stroke-dasharray="18 10"/>
+    <circle cx="1110" cy="190" r="175" stroke-opacity="0.06" stroke-width="2"/>
   </g>
   <!-- app icon -->
   <g transform="translate(90 100)">
@@ -27,18 +32,18 @@
     <circle cx="81.6" cy="90" r="28.7" fill="#fff" opacity="0.38"/>
     <circle cx="108.3" cy="90" r="32.3" fill="#fff"/>
   </g>
-  <g font-family="Segoe UI, system-ui, -apple-system, sans-serif">
-    <text x="320" y="182" font-size="76" font-weight="700" fill="#fff" letter-spacing="-1.5">bufferless</text>
-    <text x="322" y="232" font-size="28" fill="#b9b4d6">Your last 60 seconds, one hotkey away.</text>
+  <g font-family="Bahnschrift, Segoe UI, system-ui, -apple-system, sans-serif">
+    <text x="320" y="182" font-size="76" font-weight="700" fill="#f4f6f8" letter-spacing="-1">jarvis clip</text>
+    <text x="322" y="232" font-size="28" fill="#9fb3c2">Say <tspan fill="#7dd3fc">"jarvis clip that"</tspan>. The last 30 seconds are saved.</text>
     <g font-size="17" text-anchor="middle">
-      <rect x="322" y="268" width="150" height="38" rx="19" fill="#ffffff" fill-opacity="0.07" stroke="#ffffff" stroke-opacity="0.12"/>
-      <text x="397" y="293" fill="#dcd8f0">55 KB build</text>
-      <rect x="484" y="268" width="170" height="38" rx="19" fill="#ffffff" fill-opacity="0.07" stroke="#ffffff" stroke-opacity="0.12"/>
-      <text x="569" y="293" fill="#dcd8f0">no re-encoding</text>
-      <rect x="666" y="268" width="130" height="38" rx="19" fill="#ffffff" fill-opacity="0.07" stroke="#ffffff" stroke-opacity="0.12"/>
-      <text x="731" y="293" fill="#dcd8f0">no overlay</text>
-      <rect x="808" y="268" width="190" height="38" rx="19" fill="#ffffff" fill-opacity="0.07" stroke="#ffffff" stroke-opacity="0.12"/>
-      <text x="903" y="293" fill="#dcd8f0">hardware encoding</text>
+      <rect x="322" y="268" width="170" height="38" rx="19" fill="#7dd3fc" fill-opacity="0.08" stroke="#7dd3fc" stroke-opacity="0.25"/>
+      <text x="407" y="293" fill="#d6eefc">voice commands</text>
+      <rect x="504" y="268" width="150" height="38" rx="19" fill="#ffffff" fill-opacity="0.06" stroke="#ffffff" stroke-opacity="0.12"/>
+      <text x="579" y="293" fill="#d6dde3">fully offline</text>
+      <rect x="666" y="268" width="170" height="38" rx="19" fill="#ffffff" fill-opacity="0.06" stroke="#ffffff" stroke-opacity="0.12"/>
+      <text x="751" y="293" fill="#d6dde3">no re-encoding</text>
+      <rect x="848" y="268" width="150" height="38" rx="19" fill="#ffffff" fill-opacity="0.06" stroke="#ffffff" stroke-opacity="0.12"/>
+      <text x="923" y="293" fill="#d6dde3">GPU encoding</text>
     </g>
   </g>
 </svg>

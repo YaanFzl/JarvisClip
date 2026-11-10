@@ -18,25 +18,14 @@ body:
     attributes:
       label: Steps to reproduce
       placeholder: |
-        1. Start Bufferless
+        1. Start Jarvis Clip
         2. Play a game in fullscreen
         3. Press Alt+F10
         4. No clip is saved
-  - type: dropdown
-    id: build
-    attributes:
-      label: Which build?
-      options:
-        - bufferless.exe
-        - bufferless-small.exe
-        - bufferless-tiny.exe
-        - Built from source
-    validations:
-      required: true
   - type: input
     id: version
     attributes:
-      label: Bufferless version
+      label: Jarvis Clip version
       placeholder: v0.1.0
   - type: input
     id: windows
@@ -58,6 +47,6 @@ body:
     attributes:
       label: Log file
       description: |
-        Paste the contents of `%APPDATA%\bufferless\bufferless.log` (paste that path into the
-        Explorer address bar to open it). The lines from the session where it went wrong are enough.
+        Paste the contents of `jarvis-clip.log`, next to `jarvis-clip.exe`. The lines from the
+        session where it went wrong are enough.
       render: text

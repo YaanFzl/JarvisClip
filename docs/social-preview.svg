@@ -1,20 +1,25 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#1f1b38"/>
-      <stop offset="1" stop-color="#0c0b12"/>
+      <stop offset="0" stop-color="#0d1a24"/>
+      <stop offset="1" stop-color="#050506"/>
     </linearGradient>
     <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#6a5ae0"/>
       <stop offset="1" stop-color="#1e1a4a"/>
     </linearGradient>
+    <radialGradient id="glow">
+      <stop offset="0" stop-color="#38bdf8" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#38bdf8" stop-opacity="0"/>
+    </radialGradient>
   </defs>
   <rect width="1280" height="640" fill="url(#bg)"/>
-  <!-- the mark, huge and faint, bleeding off the right edge -->
-  <g fill="#fff">
-    <circle cx="1150" cy="320" r="210" opacity="0.02"/>
-    <circle cx="1240" cy="320" r="240" opacity="0.03"/>
-    <circle cx="1350" cy="320" r="270" opacity="0.045"/>
+  <!-- arc-reactor rings, faint, bleeding off the right edge -->
+  <g fill="none" stroke="#7dd3fc">
+    <circle cx="1200" cy="320" r="110" fill="url(#glow)" stroke="none"/>
+    <circle cx="1200" cy="320" r="110" stroke-opacity="0.18" stroke-width="3"/>
+    <circle cx="1200" cy="320" r="190" stroke-opacity="0.10" stroke-width="3" stroke-dasharray="26 14"/>
+    <circle cx="1200" cy="320" r="280" stroke-opacity="0.06" stroke-width="3"/>
   </g>
   <!-- app icon -->
   <g transform="translate(110 200)">
@@ -24,19 +29,17 @@
     <circle cx="108.8" cy="120" r="38.3" fill="#fff" opacity="0.38"/>
     <circle cx="144.4" cy="120" r="43.1" fill="#fff"/>
   </g>
-  <g font-family="Segoe UI, system-ui, -apple-system, sans-serif">
-    <text x="410" y="318" font-size="112" font-weight="700" fill="#fff" letter-spacing="-2">bufferless</text>
-    <text x="414" y="378" font-size="36" fill="#b9b4d6">Your last 60 seconds, one hotkey away.</text>
+  <g font-family="Bahnschrift, Segoe UI, system-ui, -apple-system, sans-serif">
+    <text x="410" y="318" font-size="112" font-weight="700" fill="#f4f6f8" letter-spacing="-2">jarvis clip</text>
+    <text x="414" y="378" font-size="36" fill="#9fb3c2">Say <tspan fill="#7dd3fc">"jarvis clip that"</tspan>. It's saved.</text>
     <g font-size="22" text-anchor="middle">
-      <rect x="414" y="414" width="160" height="46" rx="23" fill="#ffffff" fill-opacity="0.07" stroke="#ffffff" stroke-opacity="0.14"/>
-      <text x="494" y="444" fill="#dcd8f0">55 KB build</text>
-      <rect x="586" y="414" width="196" height="46" rx="23" fill="#ffffff" fill-opacity="0.07" stroke="#ffffff" stroke-opacity="0.14"/>
-      <text x="684" y="444" fill="#dcd8f0">no re-encoding</text>
-      <rect x="794" y="414" width="150" height="46" rx="23" fill="#ffffff" fill-opacity="0.07" stroke="#ffffff" stroke-opacity="0.14"/>
-      <text x="869" y="444" fill="#dcd8f0">no overlay</text>
-      <rect x="956" y="414" width="190" height="46" rx="23" fill="#ffffff" fill-opacity="0.07" stroke="#ffffff" stroke-opacity="0.14"/>
-      <text x="1051" y="444" fill="#dcd8f0">Windows 10/11</text>
+      <rect x="414" y="414" width="200" height="46" rx="23" fill="#7dd3fc" fill-opacity="0.08" stroke="#7dd3fc" stroke-opacity="0.25"/>
+      <text x="514" y="444" fill="#d6eefc">voice commands</text>
+      <rect x="626" y="414" width="170" height="46" rx="23" fill="#ffffff" fill-opacity="0.06" stroke="#ffffff" stroke-opacity="0.14"/>
+      <text x="711" y="444" fill="#d6dde3">fully offline</text>
+      <rect x="808" y="414" width="196" height="46" rx="23" fill="#ffffff" fill-opacity="0.06" stroke="#ffffff" stroke-opacity="0.14"/>
+      <text x="906" y="444" fill="#d6dde3">no re-encoding</text>
     </g>
-    <text x="640" y="586" font-size="22" fill="#7d78a0" text-anchor="middle">github.com/veyzyn/bufferless</text>
+    <text x="640" y="586" font-size="22" fill="#5d6b78" text-anchor="middle">github.com/YaanFzl/JarvisClip</text>
   </g>
 </svg>

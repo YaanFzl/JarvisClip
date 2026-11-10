@@ -21,9 +21,8 @@ pub struct Saved {
     pub path: String,
     pub size: u64,
     pub seconds: u32,
-    /// The display mode or capture settings changed, which ended the recording
-    /// early.
-    pub cut_short: bool,
+    /// Why the recording ended before it was stopped, if it did.
+    pub cut_short: Option<&'static str>,
 }
 
 pub type Outcome = core::result::Result<Saved, String>;
@@ -88,14 +87,22 @@ fn write(ring: &Mutex<Ring>, file: &str, stop: &AtomicBool) -> Outcome {
     let names = ring.lock().audio_names();
     let mut w = Mp4Writer::create(file, names).map_err(|e| e.to_string())?;
     let mut stop_at = None;
-    let mut cut_short = false;
+    let mut cut_short = None;
     loop {
         if stop_at.is_none() && stop.load(Ordering::Relaxed) {
             stop_at = Some(clock::now());
             // Audio is mixed a little behind real time; let it catch up.
             thread::sleep_ms(300);
         }
-        let batch = ring.lock().take_recorded();
+        // Read back outside the lock: with the buffer on disk this is file I/O,
+        // and capture needs the ring for every packet.
+        let pending = ring.lock().take_recorded();
+        let batch = pending.load();
+        if batch.unreadable {
+            log!("recording: couldn't read the replay buffer back from disk, ending it here");
+            cut_short = Some("Couldn't read the replay buffer back from disk.");
+            break;
+        }
         // After an early end the ring may already hold the next format.
         if !batch.ended {
             if let Some(f) = batch.format {
@@ -113,7 +120,7 @@ fn write(ring: &Mutex<Ring>, file: &str, stop: &AtomicBool) -> Outcome {
             break;
         }
         if batch.ended {
-            cut_short = true;
+            cut_short = Some("The display or capture settings changed.");
             break;
         }
         for _ in 0..5 {

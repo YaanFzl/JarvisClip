@@ -1,80 +1,79 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 330" width="1200" height="330" role="img" aria-labelledby="title desc">
-  <title id="title">How to use Bufferless</title>
-  <desc id="desc">Three steps. One: run it, and it sits in the tray keeping the last minute. Two: play your game as usual. Three: press Alt+F10 and the last minute is saved as an MP4 in Videos\Bufferless.</desc>
+  <title id="title">How to use Jarvis Clip</title>
+  <desc id="desc">Three steps. One: run it, and it sits in the tray keeping the last 30 seconds. Two: play your game as usual. Three: say "jarvis clip that" (or press Alt+F10) and the last 30 seconds are saved as an MP4 in the clips folder.</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0 0 10 5 0 10z" fill="#8a86a3"/>
+      <path d="M0 0 10 5 0 10z" fill="#7d8a96"/>
     </marker>
   </defs>
   <g font-family="Segoe UI, system-ui, -apple-system, sans-serif">
     <!-- cards -->
-    <g fill="#15141c" stroke="#2b2838" stroke-width="1.5">
+    <g fill="#0e1014" stroke="#1f252c" stroke-width="1.5">
       <rect x="15" y="15" width="360" height="300" rx="22"/>
       <rect x="420" y="15" width="360" height="300" rx="22"/>
       <rect x="825" y="15" width="360" height="300" rx="22"/>
     </g>
     <!-- numbers and titles -->
-    <g font-size="18" font-weight="700" text-anchor="middle" fill="#fff">
-      <circle cx="58" cy="58" r="18" fill="#6a5ae0"/><text x="58" y="64">1</text>
-      <circle cx="463" cy="58" r="18" fill="#6a5ae0"/><text x="463" y="64">2</text>
-      <circle cx="868" cy="58" r="18" fill="#6a5ae0"/><text x="868" y="64">3</text>
+    <g font-size="18" font-weight="700" text-anchor="middle" fill="#05202c">
+      <circle cx="58" cy="58" r="18" fill="#7dd3fc"/><text x="58" y="64">1</text>
+      <circle cx="463" cy="58" r="18" fill="#7dd3fc"/><text x="463" y="64">2</text>
+      <circle cx="868" cy="58" r="18" fill="#7dd3fc"/><text x="868" y="64">3</text>
     </g>
-    <g font-size="26" font-weight="700" fill="#fff">
+    <g font-size="26" font-weight="700" fill="#f4f6f8">
       <text x="88" y="67">Run it</text>
       <text x="493" y="67">Play</text>
-      <text x="898" y="67">Press Alt+F10</text>
+      <text x="898" y="67">Say the word</text>
     </g>
 
     <!-- 1: taskbar with the tray icon -->
-    <rect x="40" y="128" width="310" height="58" rx="12" fill="#202027"/>
-    <g fill="none" stroke="#9a97ab" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="40" y="128" width="310" height="58" rx="12" fill="#1a1d22"/>
+    <g fill="none" stroke="#9aa5b1" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
       <path d="M66 162l7-7 7 7"/>
       <path d="M193 152h5l7-6v24l-7-6h-5z"/>
       <path d="M210 152a8 8 0 0 1 0 12"/>
     </g>
-    <rect x="98" y="138" width="76" height="38" rx="9" fill="#2e2a48" stroke="#6a5ae0" stroke-width="1.5"/>
+    <rect x="98" y="138" width="76" height="38" rx="9" fill="#0f2633" stroke="#38bdf8" stroke-width="1.5"/>
     <g transform="translate(118 145) scale(0.75)">
       <circle cx="13" cy="16" r="9" fill="#fff" opacity="0.16"/>
       <circle cx="21" cy="16" r="10.2" fill="#fff" opacity="0.38"/>
       <circle cx="30.5" cy="16" r="11.5" fill="#fff"/>
     </g>
-    <text x="232" y="164" font-size="17" fill="#9a97ab">ENG</text>
-    <text x="284" y="155" font-size="15" fill="#d6d3e3">9:41 PM</text>
-    <text x="284" y="174" font-size="13" fill="#9a97ab">today</text>
+    <text x="232" y="164" font-size="17" fill="#9aa5b1">ENG</text>
+    <text x="284" y="155" font-size="15" fill="#d6dde3">9:41 PM</text>
+    <text x="284" y="174" font-size="13" fill="#9aa5b1">today</text>
 
     <!-- 2: a game screen -->
-    <rect x="490" y="100" width="220" height="132" rx="12" fill="#0f0e15" stroke="#3a3650" stroke-width="1.5"/>
-    <path d="M490 200l55-40 40 28 45-46 80 58v20a12 12 0 0 1-12 12H502a12 12 0 0 1-12-12z" fill="#1f1c33"/>
-    <circle cx="660" cy="132" r="13" fill="#2e2a48"/>
+    <rect x="490" y="100" width="220" height="132" rx="12" fill="#08090c" stroke="#2a323b" stroke-width="1.5"/>
+    <path d="M490 200l55-40 40 28 45-46 80 58v20a12 12 0 0 1-12 12H502a12 12 0 0 1-12-12z" fill="#13202a"/>
+    <circle cx="660" cy="132" r="13" fill="#1c3442"/>
     <g stroke="#fff" stroke-width="2.5" stroke-linecap="round" fill="none">
       <circle cx="600" cy="166" r="16"/>
       <path d="M600 140v12M600 180v12M574 166h12M614 166h12"/>
     </g>
-    <path d="M585 240h30" stroke="#3a3650" stroke-width="6" stroke-linecap="round"/>
+    <path d="M585 240h30" stroke="#2a323b" stroke-width="6" stroke-linecap="round"/>
 
-    <!-- 3: keys and the saved file -->
-    <g font-size="20" font-weight="600" fill="#fff" text-anchor="middle">
-      <rect x="878" y="98" width="96" height="58" rx="11" fill="#0f0e15"/>
-      <rect x="878" y="92" width="96" height="58" rx="11" fill="#23212e" stroke="#4a4562" stroke-width="1.5"/>
-      <text x="926" y="128">Alt</text>
-      <text x="1005" y="129" fill="#8a86a3">+</text>
-      <rect x="1036" y="98" width="96" height="58" rx="11" fill="#0f0e15"/>
-      <rect x="1036" y="92" width="96" height="58" rx="11" fill="#23212e" stroke="#4a4562" stroke-width="1.5"/>
-      <text x="1084" y="128">F10</text>
+    <!-- 3: speech bubble and the saved file -->
+    <path d="M870 92h258a14 14 0 0 1 14 14v34a14 14 0 0 1-14 14H920l-18 14v-14h-32a14 14 0 0 1-14-14v-34a14 14 0 0 1 14-14z" fill="#0f2633" stroke="#38bdf8" stroke-width="1.5"/>
+    <g fill="#7dd3fc">
+      <rect x="878" y="114" width="4" height="10" rx="2"/>
+      <rect x="886" y="108" width="4" height="22" rx="2"/>
+      <rect x="894" y="104" width="4" height="30" rx="2"/>
+      <rect x="902" y="111" width="4" height="16" rx="2"/>
     </g>
-    <path d="M1005 164v17" stroke="#8a86a3" stroke-width="2.5" marker-end="url(#arrow)"/>
-    <rect x="862" y="190" width="286" height="44" rx="12" fill="#1f1c33" stroke="#6a5ae0" stroke-width="1.5"/>
+    <text x="1025" y="130" font-size="21" font-weight="600" fill="#f4f6f8" text-anchor="middle">"jarvis clip that"</text>
+    <path d="M1005 168v13" stroke="#7d8a96" stroke-width="2.5" marker-end="url(#arrow)"/>
+    <rect x="862" y="190" width="286" height="44" rx="12" fill="#101b22" stroke="#38bdf8" stroke-width="1.5"/>
     <path d="M884 202l14 10-14 10z" fill="#fff"/>
-    <text x="910" y="218" font-size="16" fill="#e6e3f3">game 2026-10-02 21-14-03.mp4</text>
+    <text x="910" y="218" font-size="16" fill="#d6eefc">game 2026-10-02 21-14-03.mp4</text>
 
     <!-- captions -->
-    <g font-size="17" fill="#a9a6bd">
+    <g font-size="17" fill="#9fb3c2">
       <text x="45" y="262">It sits in the tray and quietly</text>
-      <text x="45" y="286">keeps the last minute of your screen.</text>
+      <text x="45" y="286">keeps the last 30 seconds.</text>
       <text x="450" y="262">Games, streams, whatever.</text>
       <text x="450" y="286">There's nothing to start or stop.</text>
-      <text x="855" y="262">The last minute is saved to</text>
-      <text x="855" y="286">Videos\Bufferless as an MP4.</text>
+      <text x="855" y="262">Saved to clips\ as an MP4.</text>
+      <text x="855" y="286">Alt+F10 works too.</text>
     </g>
   </g>
 </svg>

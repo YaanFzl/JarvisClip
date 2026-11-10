@@ -544,11 +544,14 @@ function renderSettings(c) {
   $("confV").textContent = c.voice_min_confidence + "%";
   document.querySelectorAll(".switch[data-key]").forEach((s) => s.setAttribute("aria-checked", String(!!c[s.dataset.key])));
   $("saveFolder").textContent = c.save_folder;
-  const onDisk = c.buffer_folder !== "";
+  // What the buffer really does: a disk error falls back to RAM.
+  const wantDisk = c.buffer_folder !== "", onDisk = state.onDisk;
   seg($("bufferSeg"), onDisk ? "disk" : "ram");
-  $("bufferPath").style.display = onDisk ? "" : "none";
+  $("bufferPath").style.display = wantDisk ? "" : "none";
   $("bufferFolder").textContent = c.buffer_folder;
-  $("bufferNote").textContent = onDisk ? "Temp files, deleted as they age out. Keeps RAM free." : "Held in memory. No disk writes, more RAM.";
+  $("bufferNote").textContent = onDisk ? "Temp files, deleted as they age out. Keeps RAM free."
+    : wantDisk ? "Couldn't write to this folder, so the buffer is in RAM. Click Disk to try again."
+    : "Held in memory. No disk writes, more RAM.";
   if (startedVoice === null) startedVoice = c.voice;
   $("voiceNote").classList.toggle("show", c.voice !== startedVoice);
 }
@@ -619,7 +622,7 @@ function render(s) {
     bar.classList.toggle("on", i < filled);
     bar.style.transform = `scaleY(${i < filled ? 0.55 + 0.45 * Math.abs(Math.sin(i * 1.7)) : 0.28})`;
   });
-  $("bufWhere").textContent = c.buffer_folder ? "on disk" : "in RAM";
+  $("bufWhere").textContent = s.onDisk ? "on disk" : "in RAM";
   $("bufSize").textContent = mb(s.bufferBytes);
   $("capStatus").textContent = s.status || "Starting capture";
   const live = $("live"), rec = s.recording;
@@ -717,8 +720,8 @@ $("monitor").onchange = (e) => save({ monitor: Number(e.target.value) });
 $("bufferSeg").onclick = (e) => {
   const b = e.target.closest("button"); if (!b) return;
   const disk = b.dataset.v === "disk";
-  if (disk === !!state.config.buffer_folder) return;
-  save({ buffer_folder: disk ? options.defaultBuffer : "" }, disk ? "Buffer moved to disk" : "Buffer moved to RAM");
+  if (disk === state.onDisk) return;
+  save({ buffer_folder: disk ? state.config.buffer_folder || options.defaultBuffer : "" }, disk ? "Buffer moved to disk" : "Buffer moved to RAM");
 };
 
 async function tick() {

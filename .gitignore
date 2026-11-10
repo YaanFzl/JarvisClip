@@ -1,5 +1,3 @@
 /target
-/test.mp4
-/run.log
 /dist
-/c/build/
+/build.local.sh

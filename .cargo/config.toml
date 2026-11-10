@@ -1,7 +1,7 @@
 [target.x86_64-pc-windows-msvc]
 # "Hybrid CRT": link the VC runtime statically but use the Universal CRT DLL,
 # which ships with Windows 10+. No redistributable needed, and much smaller
-# than linking the UCRT statically too. Keep build-tiny.ps1 in sync.
+# than linking the UCRT statically too.
 rustflags = [
     "-C", "target-feature=+crt-static",
     "-C", "link-arg=/NODEFAULTLIB:libucrt.lib",

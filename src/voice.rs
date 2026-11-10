@@ -166,6 +166,10 @@ pub struct Heard {
 static STATUS: std::sync::Mutex<(String, VecDeque<Heard>)> = std::sync::Mutex::new((String::new(), VecDeque::new()));
 /// Lowest word confidence (percent) a phrase needs to count; live-adjustable.
 static MIN_CONFIDENCE: AtomicU32 = AtomicU32::new(50);
+/// The configured microphone's device id ("" = Windows default), and a count
+/// bumped on every change so `listen` knows to reopen it.
+static MICROPHONE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+static MICROPHONE_CHANGES: AtomicU32 = AtomicU32::new(0);
 
 fn set_state(state: impl Into<String>) {
     STATUS.lock().unwrap().0 = state.into();
@@ -179,6 +183,13 @@ pub fn status() -> (String, Vec<Heard>) {
 
 pub fn set_min_confidence(percent: u32) {
     MIN_CONFIDENCE.store(percent, Ordering::Relaxed);
+}
+
+/// Listen on this device (config `microphone_device`, "" for the default),
+/// the same mic the clips record.
+pub fn set_microphone(id: &str) {
+    *MICROPHONE.lock().unwrap() = id.into();
+    MICROPHONE_CHANGES.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Listen in the background for as long as the app runs. `min_confidence`
@@ -226,21 +237,28 @@ pub fn start(hwnd: HWND, msg: u32, min_confidence: u32, dir: String, wav: Option
             return play_wav(&wav, &mut vosk, &mut on_result);
         }
         loop {
+            // Ok: the microphone setting changed, so reopen right away.
             if let Err(e) = listen(&mut vosk, &mut on_result) {
                 set_state("microphone lost, retrying");
                 log!("voice: microphone lost ({e}), retrying in 5 s");
+                thread::sleep_ms(5000);
+                set_state("listening");
             }
-            thread::sleep_ms(5000);
-            set_state("listening");
         }
     });
 }
 
-/// Capture the default microphone until it fails.
+/// Capture the configured microphone until it fails or the setting changes.
 fn listen(vosk: &mut Vosk, on_result: &mut impl FnMut(String)) -> windows::core::Result<()> {
     use crate::audio::{enumerator, start_client};
     unsafe {
-        let device = enumerator()?.GetDefaultAudioEndpoint(eCapture, eConsole)?;
+        let changes = MICROPHONE_CHANGES.load(Ordering::Relaxed);
+        let id = MICROPHONE.lock().unwrap().clone();
+        let device = if id.is_empty() {
+            enumerator()?.GetDefaultAudioEndpoint(eCapture, eConsole)?
+        } else {
+            enumerator()?.GetDevice(&HSTRING::from(&id))?
+        };
         let client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
         let capture = start_client(&client, false)?; // 48 kHz stereo f32
         let mut mono = Vec::new();
@@ -248,6 +266,9 @@ fn listen(vosk: &mut Vosk, on_result: &mut impl FnMut(String)) -> windows::core:
         let mut count = 0;
         loop {
             thread::sleep_ms(50);
+            if MICROPHONE_CHANGES.load(Ordering::Relaxed) != changes {
+                return Ok(());
+            }
             while capture.GetNextPacketSize()? > 0 {
                 let mut data = core::ptr::null_mut();
                 let (mut frames, mut flags) = (0u32, 0u32);

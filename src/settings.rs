@@ -122,6 +122,45 @@ fn set_text(ctl: HWND, text: &str) {
     }
 }
 
+/// Copy onto `live` only the fields this window changed between `opened_with`
+/// and `form`. The control window may have changed other settings (or these)
+/// while this one was open, and those changes must survive its Save.
+pub fn merge_changes(opened_with: &Config, form: &Config, live: &mut Config) {
+    macro_rules! take {
+        ($($field:ident),*) => {$(
+            if form.$field != opened_with.$field {
+                live.$field = form.$field.clone();
+            }
+        )*};
+    }
+    take!(
+        hotkey_modifiers,
+        hotkey_key,
+        record_hotkey_modifiers,
+        record_hotkey_key,
+        replay_seconds,
+        monitor,
+        resolution,
+        fps,
+        bitrate_mbps,
+        capture_cursor,
+        keep_stretched,
+        system_audio,
+        system_audio_device,
+        microphone,
+        microphone_device,
+        microphone_volume,
+        separate_audio_tracks,
+        app_tracks,
+        save_folder,
+        save_sound,
+        save_sound_file,
+        notifications,
+        theme,
+        start_with_windows
+    );
+}
+
 pub fn open(cfg: Config) {
     if let Some(hwnd) = window() {
         unsafe {
@@ -413,7 +452,8 @@ impl Settings {
         (width, y)
     }
 
-    /// Read the form into a Config.
+    /// Read the form into a Config. Fields the form doesn't show keep the
+    /// values the window opened with; see `merge_changes`.
     fn read(&self) -> Config {
         let h = self.hwnd;
         let mut cfg = self.cfg.clone();
@@ -612,12 +652,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let code = ((wparam.0 >> 16) & 0xffff) as u32;
             match id {
                 x if x == IDOK.0 => {
-                    let cfg = STATE.with(|s| s.borrow().as_ref().map(|s| s.read()));
+                    let cfgs = STATE.with(|s| s.borrow().as_ref().map(|s| (s.cfg.clone(), s.read())));
                     unsafe {
                         let _ = DestroyWindow(hwnd);
                     }
-                    if let Some(cfg) = cfg {
-                        app::apply_config(cfg);
+                    if let Some((opened_with, form)) = cfgs {
+                        app::apply_config(&opened_with, &form);
                     }
                 }
                 x if x == IDCANCEL.0 => unsafe {
@@ -802,5 +842,26 @@ mod hotkey_box {
             },
             _ => unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn save_keeps_changes_made_elsewhere_meanwhile() {
+        let opened_with = Config::default();
+        let mut form = opened_with.clone();
+        form.fps = 144; // changed in this window
+        let mut live = opened_with.clone();
+        live.buffer_folder = String::new(); // changed in the control window
+        live.voice = !opened_with.voice;
+        live.replay_seconds = 120;
+        merge_changes(&opened_with, &form, &mut live);
+        assert_eq!(live.fps, 144);
+        assert_eq!(live.buffer_folder, "");
+        assert_eq!(live.voice, !opened_with.voice);
+        assert_eq!(live.replay_seconds, 120, "unchanged in the form, so not reverted");
     }
 }

@@ -93,6 +93,7 @@ struct App {
     hotkey_ok: bool,
     record_hotkey_ok: bool,
     last_clip: Option<String>,
+    clips: RefCell<ClipList>,
 }
 
 static APP: UiCell<RefCell<Option<App>>> = UiCell::new(RefCell::new(None));
@@ -147,6 +148,7 @@ pub fn run(first_run: bool) {
             // JARVIS_VOICE_WAV: listen to a .wav file instead of the mic (testing).
             let wav = std::env::var("JARVIS_VOICE_WAV").ok();
             let dir = path::join(&Config::dir(), "vosk");
+            voice::set_microphone(&cfg.microphone_device);
             voice::start(hwnd, WM_VOICE, cfg.voice_min_confidence, dir, wav);
         }
         let app = App {
@@ -160,6 +162,7 @@ pub fn run(first_run: bool) {
             hotkey_ok: false,
             record_hotkey_ok: false,
             last_clip: None,
+            clips: RefCell::default(),
             cfg,
         };
         APP.with(|a| *a.borrow_mut() = Some(app));
@@ -352,6 +355,7 @@ impl App {
     }
 
     fn on_clip_saved(&mut self, result: Result<(String, u64), String>) {
+        self.clips.borrow_mut().invalidate();
         match result {
             Ok((path, size)) => {
                 self.play_saved_sound();
@@ -412,14 +416,15 @@ impl App {
     fn on_recording_saved(&mut self, outcome: record::Outcome) {
         // The thread is done, so this doesn't block.
         self.recording = None;
+        self.clips.borrow_mut().invalidate();
         match outcome {
             Ok(saved) => {
                 self.play_saved_sound();
                 let (m, s) = (saved.seconds / 60, saved.seconds % 60);
                 let summary = format!("{} ({m}:{s:02}, {})", path::file_name(&saved.path), megabytes(saved.size));
-                if saved.cut_short {
+                if let Some(why) = saved.cut_short {
                     // Always worth knowing about, even with notifications off.
-                    self.notify("Recording stopped", &format!("The display or capture settings changed. {summary}"));
+                    self.notify("Recording stopped", &format!("{why} {summary}"));
                 } else {
                     self.notify_success("Recording saved", &summary);
                 }
@@ -434,8 +439,7 @@ impl App {
     }
 }
 
-/// "12.3 MB". Integer math on purpose: float formatting costs ~5 KB in the
-/// tiny build.
+/// "12.3 MB".
 fn megabytes(bytes: u64) -> String {
     let tenths = (bytes + 50_000) / 100_000;
     format!("{}.{} MB", tenths / 10, tenths % 10)
@@ -491,8 +495,15 @@ impl App {
         if old.theme != self.cfg.theme {
             theme::set_menu_theme(theme::is_dark(self.cfg.theme));
         }
-        if old.buffer_folder != self.cfg.buffer_folder {
-            self.ring.lock().set_spool(&self.cfg.buffer_folder);
+        {
+            // Also retries a disk buffer that fell back to RAM after an error.
+            let mut ring = self.ring.lock();
+            if old.buffer_folder != self.cfg.buffer_folder || ring.spooling() != !self.cfg.buffer_folder.is_empty() {
+                ring.set_spool(&self.cfg.buffer_folder);
+            }
+        }
+        if old.microphone_device != self.cfg.microphone_device {
+            voice::set_microphone(&self.cfg.microphone_device);
         }
         voice::set_min_confidence(self.cfg.voice_min_confidence);
         self.refresh_tray();
@@ -504,9 +515,9 @@ impl App {
         use ui::json_str as s;
         let c = &self.cfg;
         let status = self.pipeline.as_ref().map(|p| p.status()).unwrap_or_default();
-        let (buffered, bytes) = {
+        let (buffered, bytes, on_disk) = {
             let ring = self.ring.lock();
-            (ring.seconds().min(c.replay_seconds), ring.bytes())
+            (ring.seconds().min(c.replay_seconds), ring.bytes(), ring.spooling())
         };
         let recording = match &self.recording {
             Some(r) => format!("{{\"seconds\":{},\"stopping\":{}}}", r.seconds(), r.stopping()),
@@ -522,7 +533,10 @@ impl App {
             })
             .collect();
         let phrases: Vec<String> = voice::PHRASES.iter().map(|(_, p)| s(p[0])).collect();
-        let clips: Vec<String> = list_clips(&c.save_folder)
+        let clips: Vec<String> = self
+            .clips
+            .borrow_mut()
+            .get(&c.save_folder)
             .iter()
             .map(|(name, size, time)| format!("{{\"name\":{},\"size\":{size},\"time\":{time}}}", s(name)))
             .collect();
@@ -560,7 +574,7 @@ impl App {
             String::new()
         };
         format!(
-            "{{\"status\":{},\"buffered\":{buffered},\"bufferBytes\":{bytes},\"recording\":{recording},\"voice\":{{\"state\":{},\"heard\":[{}],\"phrases\":[{}]}},\"hotkeys\":{{\"clip\":{},\"record\":{}}},\"estimateMb\":{},\"config\":{config},\"clips\":[{}]{options}}}",
+            "{{\"status\":{},\"buffered\":{buffered},\"bufferBytes\":{bytes},\"onDisk\":{on_disk},\"recording\":{recording},\"voice\":{{\"state\":{},\"heard\":[{}],\"phrases\":[{}]}},\"hotkeys\":{{\"clip\":{},\"record\":{}}},\"estimateMb\":{},\"config\":{config},\"clips\":[{}]{options}}}",
             s(&status),
             s(&voice_state),
             heard.join(","),
@@ -570,6 +584,31 @@ impl App {
             c.estimated_memory_mb(),
             clips.join(",")
         )
+    }
+}
+
+/// The control window's clip list. Listing means a stat per file, so it's
+/// only redone every few seconds or after a save, not on every poll.
+#[derive(Default)]
+struct ClipList {
+    folder: String,
+    /// clock::now() when listed; 0 = stale.
+    at: i64,
+    clips: Vec<(String, u64, u64)>,
+}
+
+impl ClipList {
+    fn get(&mut self, folder: &str) -> &[(String, u64, u64)] {
+        if self.folder != folder || clock::now() - self.at > 5 * clock::SECOND {
+            self.clips = list_clips(folder);
+            self.folder = folder.into();
+            self.at = clock::now();
+        }
+        &self.clips
+    }
+
+    fn invalidate(&mut self) {
+        self.at = 0;
     }
 }
 
@@ -679,9 +718,15 @@ fn handle_ui_request(req: &mut ui::Request) {
     };
 }
 
-/// Called by the settings window when the user hits Save.
-pub fn apply_config(cfg: Config) {
-    with_app(|a| a.apply(cfg));
+/// Called by the settings window when the user hits Save, with the config it
+/// opened with and what the form says now. Only what changed in the form is
+/// applied, so changes made in the control window meanwhile are kept.
+pub fn apply_config(opened_with: &Config, form: &Config) {
+    with_app(|a| {
+        let mut new = a.cfg.clone();
+        settings::merge_changes(opened_with, form, &mut new);
+        a.apply(new);
+    });
 }
 
 fn handle_command(cmd: usize) {

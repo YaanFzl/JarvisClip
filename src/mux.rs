@@ -407,7 +407,7 @@ fn write_moov(f: &VideoFormat, sps: &[u8], pps: &[u8], video: &Track, audio: &[(
     m.u16(1); // frame count
     let mut compressor = [0u8; 32];
     compressor[0] = 10;
-    compressor[1..11].copy_from_slice(b"bufferless");
+    compressor[1..11].copy_from_slice(b"jarvisclip");
     m.bytes(&compressor);
     m.u16(0x0018);
     m.u16(0xffff);
