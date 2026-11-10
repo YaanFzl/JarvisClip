@@ -31,7 +31,8 @@ no account, no background services, and the speech recognition runs offline on y
 </p>
 
 1. **Download** `jarvis-clip.exe` from the [latest release](../../releases/latest) into a
-   folder of its own, and add the [voice files](#voice-setup). Run it. There's no installer.
+   folder of its own and run it. There's no installer. The first run fetches the
+   [voice files](#voice-files) (~55 MB, once).
 2. **Play**, stream, work, whatever. It's always keeping the last 30 seconds.
 3. **Say "jarvis clip that"**, or press **Alt+F10**. You'll hear a short chime, and the clip
    lands in `clips\` next to the exe, named after whatever was on screen:
@@ -49,10 +50,17 @@ Double-click the tray icon (or press **Ctrl+Alt+J**) to open the control window.
 > The exe isn't code-signed, so Windows may say **"Windows protected your PC"** the
 > first time. Click **More info**, then **Run anyway**.
 
-### Voice setup
+### Voice files
 
-Voice commands use [Vosk](https://alphacephei.com/vosk/), which isn't bundled in the exe.
-Put it in a `vosk` folder next to `jarvis-clip.exe`:
+Voice commands use [Vosk](https://alphacephei.com/vosk/), which is too big to put in the
+exe. On the first run with voice on, Jarvis Clip downloads it from the official sources,
+checks each download against a pinned SHA-256 hash, and unpacks it into a `vosk` folder
+next to the exe:
+
+- [vosk-win64-0.3.45.zip](https://github.com/alphacep/vosk-api/releases/tag/v0.3.45) (the DLLs)
+- [vosk-model-small-en-us-0.15](https://alphacephei.com/vosk/models) (the English model, in `vosk\model`)
+
+Offline PC? Unpack those two yourself into the same layout:
 
 ```
 jarvis-clip.exe
@@ -60,11 +68,8 @@ vosk\libvosk.dll, libstdc++-6.dll, libgcc_s_seh-1.dll, libwinpthread-1.dll
 vosk\model\...
 ```
 
-- The DLLs come from [vosk-win64-0.3.45.zip](https://github.com/alphacep/vosk-api/releases/tag/v0.3.45).
-- The model is [vosk-model-small-en-us-0.15](https://alphacephei.com/vosk/models): unzip it and
-  rename the folder to `model`.
-
-Without `vosk\`, voice is off and everything else still works.
+If the download fails, voice is off and everything else still works. The control window
+shows why.
 
 ## The control window
 

@@ -1,6 +1,8 @@
 //! Voice commands with Vosk (offline speech recognition, Apache-2.0).
 //! `vosk\libvosk.dll` and the small English model in `vosk\model`, next to the
-//! exe, are loaded at runtime; without them voice is simply off. Vosk only
+//! exe, are loaded at runtime. If they're missing, the official release zips
+//! are downloaded once (checked against pinned SHA-256 hashes) and unpacked
+//! there; if that fails, voice is simply off. Vosk only
 //! listens for a fixed list of phrases (a grammar, with "[unk]" for anything
 //! else), so it is light and rarely fires on talk or game sound.
 //! (Windows' own recognizers are no use here: the SAPI desktop engine is gone
@@ -202,6 +204,10 @@ pub fn start(hwnd: HWND, msg: u32, min_confidence: u32, dir: String, wav: Option
     // ponytail: the thread is never joined; it ends with the process.
     let _ = thread::spawn("voice", move || {
         let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        if let Err(e) = install(&dir) {
+            set_state(format!("unavailable: {e}"));
+            return log!("voice commands unavailable: {e}");
+        }
         let mut vosk = match Vosk::load(&dir) {
             Ok(v) => v,
             Err(e) => {
@@ -246,6 +252,79 @@ pub fn start(hwnd: HWND, msg: u32, min_confidence: u32, dir: String, wav: Option
             }
         }
     });
+}
+
+/// The Vosk library and model: where to get them, their SHA-256, and the
+/// folder inside the zip.
+const DOWNLOADS: [(&str, &str, &str); 2] = [
+    (
+        "https://github.com/alphacep/vosk-api/releases/download/v0.3.45/vosk-win64-0.3.45.zip",
+        "f1dcc9cca460630f81ea8f71794f69c80bed6556d2a4e6237b5785e1d2dff34b",
+        "vosk-win64-0.3.45",
+    ),
+    (
+        "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip",
+        "30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498",
+        "vosk-model-small-en-us-0.15",
+    ),
+];
+
+/// Download and unpack Vosk into `dir` unless it's already there. Uses the
+/// curl.exe and tar.exe that ship with Windows 10 1803 and later.
+fn install(dir: &str) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    use std::path::Path;
+    let dir = Path::new(dir);
+    if dir.join("libvosk.dll").exists() && dir.join("model").exists() {
+        return Ok(());
+    }
+    set_state("downloading voice files (one time, ~55 MB)");
+    log!("voice: downloading Vosk into {}", dir.display());
+    let system32 = Path::new(&std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into())).join("System32");
+    let run = |exe: &str, args: &[&std::ffi::OsStr]| -> Result<(), String> {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let ok = std::process::Command::new(system32.join(exe))
+            .args(args)
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+            .is_ok_and(|s| s.success());
+        if ok { Ok(()) } else { Err(format!("{exe} failed")) }
+    };
+    let tmp = dir.with_extension("download");
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
+    for (url, sha, _) in DOWNLOADS {
+        let zip = tmp.join("download.zip");
+        run("curl.exe", &["-fsSL".as_ref(), "--retry".as_ref(), "2".as_ref(), "-o".as_ref(), zip.as_os_str(), url.as_ref()])
+            .map_err(|_| format!("couldn't download {url}"))?;
+        let data = std::fs::read(&zip).map_err(|e| e.to_string())?;
+        if sha256_hex(&data) != sha {
+            let _ = std::fs::remove_dir_all(&tmp);
+            return Err(format!("{url} doesn't match its expected checksum"));
+        }
+        run("tar.exe", &["-xf".as_ref(), zip.as_os_str(), "-C".as_ref(), tmp.as_os_str()])?;
+        let _ = std::fs::remove_file(&zip);
+    }
+    let move_err = |e: std::io::Error| format!("can't set up {}: {e}", dir.display());
+    std::fs::create_dir_all(dir).map_err(move_err)?;
+    let lib = tmp.join(DOWNLOADS[0].2);
+    for entry in std::fs::read_dir(&lib).map_err(move_err)?.flatten() {
+        if entry.path().extension().is_some_and(|e| e.eq_ignore_ascii_case("dll")) {
+            std::fs::rename(entry.path(), dir.join(entry.file_name())).map_err(move_err)?;
+        }
+    }
+    let _ = std::fs::remove_dir_all(dir.join("model"));
+    std::fs::rename(tmp.join(DOWNLOADS[1].2), dir.join("model")).map_err(move_err)?;
+    let _ = std::fs::remove_dir_all(&tmp);
+    log!("voice: Vosk installed");
+    Ok(())
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    use windows::Win32::Security::Cryptography::{BCRYPT_SHA256_ALG_HANDLE, BCryptHash};
+    let mut hash = [0u8; 32];
+    let _ = unsafe { BCryptHash(BCRYPT_SHA256_ALG_HANDLE, None, data, &mut hash) };
+    hash.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Capture the configured microphone until it fails or the setting changes.
@@ -336,5 +415,22 @@ mod tests {
         assert_eq!(command(&w("jarvis")), None);
         assert!(parse("{\"text\" : \"\"}").is_empty());
         assert!(grammar().ends_with("\"jarvis stop recording\", \"[unk]\"]"));
+    }
+
+    #[test]
+    fn hashes_downloads_with_sha256() {
+        assert_eq!(sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
+
+    /// Downloads ~55 MB: `cargo test -- --ignored installs_vosk`.
+    #[test]
+    #[ignore]
+    fn installs_vosk() {
+        let dir = std::env::temp_dir().join("jarvis-vosk-test").join("vosk");
+        let _ = std::fs::remove_dir_all(&dir);
+        install(dir.to_str().unwrap()).unwrap();
+        assert!(dir.join("libvosk.dll").exists() && dir.join("model").join("am").exists());
+        assert!(!dir.with_extension("download").exists());
+        assert!(Vosk::load(dir.to_str().unwrap()).is_ok());
     }
 }

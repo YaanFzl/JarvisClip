@@ -78,7 +78,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          notes="Put **jarvis-clip.exe** in a folder of its own. Voice commands also need a \`vosk\` folder next to it; see the README."
+          notes="Put **jarvis-clip.exe** in a folder of its own and run it. The first run downloads the voice files (~55 MB, once)."
           # Creates the tag too when it doesn't exist yet. Tags made with the
           # workflow token don't trigger another run.
           gh release create "$VERSION" target/release/jarvis-clip.exe \
