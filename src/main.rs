@@ -26,6 +26,8 @@ mod rt;
 mod settings;
 mod theme;
 mod util;
+mod ui;
+mod voice;
 
 use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, LPARAM, WPARAM};
 use windows::Win32::Media::MediaFoundation::{MF_VERSION, MFSTARTUP_FULL, MFShutdown, MFStartup};
@@ -51,7 +53,7 @@ fn main() {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
         // Single instance: a second launch just opens the running one's settings.
-        let _mutex = CreateMutexW(None, true, w!("Local\\Bufferless.SingleInstance"));
+        let _mutex = CreateMutexW(None, true, w!("Local\\JarvisClip.SingleInstance"));
         if GetLastError() == ERROR_ALREADY_EXISTS {
             if let Ok(hwnd) = FindWindowW(app::WINDOW_CLASS, None) {
                 let _ = PostMessageW(Some(hwnd), app::WM_SHOW_SETTINGS, WPARAM(0), LPARAM(0));
@@ -72,8 +74,8 @@ fn main() {
         let dir = Config::dir();
         let _ = rt::fs::create_dir_all(&dir);
         let first_run = !rt::fs::exists(&rt::path::join(&dir, "config.toml"));
-        logging::init(&rt::path::join(&dir, "bufferless.log"));
-        log!("bufferless {VERSION} starting");
+        logging::init(&rt::path::join(&dir, "jarvis-clip.log"));
+        log!("jarvis-clip {VERSION} starting");
 
         app::run(first_run);
 

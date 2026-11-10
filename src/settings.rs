@@ -31,7 +31,7 @@ use crate::rt::UiCell;
 use crate::theme::Palette;
 use crate::util::{hotkey_name, wide, window_text};
 
-const CLASS: PCWSTR = w!("BufferlessSettings");
+const CLASS: PCWSTR = w!("JarvisClipSettings");
 
 const ID_HOTKEY: i32 = 100;
 const ID_LENGTH: i32 = 101;
@@ -64,7 +64,7 @@ const ID_THEME: i32 = 126;
 /// Edit boxes, which get the field colours even when disabled.
 const FIELDS: [i32; 7] = [ID_HOTKEY, ID_RECORD_HOTKEY, ID_BITRATE, ID_MIC_VOLUME, ID_FOLDER, ID_APP_TRACKS, ID_SOUND_FILE];
 
-const LENGTHS: [(u32, &str); 9] = [
+pub(crate) const LENGTHS: [(u32, &str); 9] = [
     (15, "15 seconds"),
     (30, "30 seconds"),
     (60, "1 minute"),
@@ -75,8 +75,8 @@ const LENGTHS: [(u32, &str); 9] = [
     (600, "10 minutes"),
     (1200, "20 minutes"),
 ];
-const RESOLUTIONS: [(u32, &str); 5] = [(0, "Native"), (1440, "1440p"), (1080, "1080p"), (900, "900p"), (720, "720p")];
-const FRAME_RATES: [u32; 8] = [30, 60, 90, 120, 144, 165, 240, 360];
+pub(crate) const RESOLUTIONS: [(u32, &str); 5] = [(0, "Native"), (1440, "1440p"), (1080, "1080p"), (900, "900p"), (720, "720p")];
+pub(crate) const FRAME_RATES: [u32; 8] = [30, 60, 90, 120, 144, 165, 240, 360];
 const THEMES: [&str; 3] = ["Same as Windows", "Light", "Dark"];
 
 struct Settings {
@@ -146,7 +146,7 @@ pub fn open(cfg: Config) {
         let Ok(hwnd) = CreateWindowExW(
             WS_EX_CONTROLPARENT,
             CLASS,
-            w!("Bufferless Settings"),
+            w!("Jarvis Clip Settings"),
             style,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -480,7 +480,7 @@ impl Settings {
 }
 
 /// A file or folder picker. Returns the chosen path.
-fn browse(owner: HWND, current: &str, folders: bool) -> Option<String> {
+pub(crate) fn browse(owner: HWND, current: &str, folders: bool) -> Option<String> {
     unsafe {
         let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
         let opts = dialog.GetOptions().ok()?;

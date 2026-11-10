@@ -2,7 +2,6 @@ use crate::prelude::*;
 use crate::rt::{self, fs, path};
 
 use windows::Win32::UI::Input::KeyboardAndMouse::{MOD_ALT, MOD_CONTROL, VK_F9, VK_F10};
-use windows::Win32::UI::Shell::{FOLDERID_RoamingAppData, FOLDERID_Videos, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Theme {
@@ -54,6 +53,9 @@ pub struct Config {
     /// Extra per-app tracks, each "Name: app.exe, other.exe".
     pub app_tracks: Vec<String>,
     pub save_folder: String,
+    /// Where the replay buffer lives while it waits to be clipped: temp
+    /// files in this folder. Empty = keep it in RAM instead.
+    pub buffer_folder: String,
     pub save_sound: bool,
     /// A .wav file to play instead of the built-in chime; empty = chime.
     pub save_sound_file: String,
@@ -61,27 +63,29 @@ pub struct Config {
     pub notifications: bool,
     pub theme: Theme,
     pub start_with_windows: bool,
+    /// Listen for "jarvis clip that" / "jarvis record" / "jarvis stop".
+    pub voice: bool,
+    /// Recognizer confidence (percent) a voice command needs. Raise it if
+    /// game sound or talking sets it off, lower it if it misses you.
+    pub voice_min_confidence: u32,
 }
 
-fn known_folder(id: &windows::core::GUID) -> Option<String> {
-    unsafe {
-        let p = SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None).ok()?;
-        let s = p.to_string().ok();
-        windows::Win32::System::Com::CoTaskMemFree(Some(p.0 as _));
-        s
-    }
+/// The folder the exe is in. Portable: config, log and clips all live next to
+/// the exe (on whatever drive it is on), nothing in AppData.
+fn exe_dir() -> String {
+    let exe = path::current_exe();
+    exe.rsplit_once(['\\', '/']).map_or(".".into(), |(dir, _)| dir.into())
 }
 
 impl Default for Config {
     fn default() -> Self {
-        let videos = known_folder(&FOLDERID_Videos).unwrap_or_else(|| ".".into());
         Self {
             hotkey_modifiers: MOD_ALT.0,
             hotkey_key: VK_F10.0 as u32,
             // Ctrl+Alt: NVIDIA's overlay already owns Alt+F9 for its own recording.
             record_hotkey_modifiers: MOD_CONTROL.0 | MOD_ALT.0,
             record_hotkey_key: VK_F9.0 as u32,
-            replay_seconds: 60,
+            replay_seconds: 30,
             monitor: 0,
             resolution: 0,
             fps: 60,
@@ -95,19 +99,22 @@ impl Default for Config {
             microphone_volume: 100,
             separate_audio_tracks: false,
             app_tracks: Vec::new(),
-            save_folder: path::join(&videos, "Bufferless"),
+            save_folder: path::join(&exe_dir(), "clips"),
+            buffer_folder: path::join(&exe_dir(), "buffer"),
             save_sound: true,
             save_sound_file: String::new(),
             notifications: true,
             theme: Theme::System,
             start_with_windows: false,
+            voice: true,
+            voice_min_confidence: 50,
         }
     }
 }
 
 impl Config {
     pub fn dir() -> String {
-        path::join(&known_folder(&FOLDERID_RoamingAppData).unwrap_or_else(|| ".".into()), "bufferless")
+        exe_dir()
     }
 
     fn path() -> String {
@@ -130,7 +137,7 @@ impl Config {
 
     /// Read `key = value` lines (the flat subset of TOML this file uses).
     /// Unknown keys and malformed values are ignored and keep their defaults.
-    fn parse(&mut self, text: &str) {
+    pub(crate) fn parse(&mut self, text: &str) {
         for line in text.lines() {
             let line = line.trim();
             if line.starts_with('#') {
@@ -165,11 +172,14 @@ impl Config {
                 "separate_audio_tracks" => set(&mut self.separate_audio_tracks, flag()),
                 "app_tracks" => set(&mut self.app_tracks, parse_string_array(value)),
                 "save_folder" => set(&mut self.save_folder, text()),
+                "buffer_folder" => set(&mut self.buffer_folder, text()),
                 "save_sound" => set(&mut self.save_sound, flag()),
                 "save_sound_file" => set(&mut self.save_sound_file, text()),
                 "notifications" => set(&mut self.notifications, flag()),
                 "theme" => set(&mut self.theme, text().and_then(|t| Theme::ALL.into_iter().find(|v| v.name() == t))),
                 "start_with_windows" => set(&mut self.start_with_windows, flag()),
+                "voice" => set(&mut self.voice, flag()),
+                "voice_min_confidence" => set(&mut self.voice_min_confidence, num()),
                 _ => {}
             }
         }
@@ -204,19 +214,23 @@ impl Config {
         line("separate_audio_tracks", self.separate_audio_tracks.to_string());
         line("app_tracks", list(&self.app_tracks));
         line("save_folder", s(&self.save_folder));
+        line("buffer_folder", s(&self.buffer_folder));
         line("save_sound", self.save_sound.to_string());
         line("save_sound_file", s(&self.save_sound_file));
         line("notifications", self.notifications.to_string());
         line("theme", s(self.theme.name()));
         line("start_with_windows", self.start_with_windows.to_string());
+        line("voice", self.voice.to_string());
+        line("voice_min_confidence", self.voice_min_confidence.to_string());
         out
     }
 
-    fn sanitize(&mut self) {
+    pub(crate) fn sanitize(&mut self) {
         self.replay_seconds = self.replay_seconds.clamp(5, 30 * 60);
         self.fps = self.fps.clamp(10, 360);
         self.bitrate_mbps = self.bitrate_mbps.clamp(1, 150);
         self.microphone_volume = self.microphone_volume.min(400);
+        self.voice_min_confidence = self.voice_min_confidence.min(100);
     }
 
     /// Settings that require restarting the capture pipeline when changed.
@@ -273,7 +287,12 @@ fn take_string(value: &str) -> Option<(String, &str)> {
             '\\' => match chars.next()?.1 {
                 'n' => out.push('\n'),
                 't' => out.push('\t'),
-                other => out.push(other),
+                c @ ('\\' | '"') => out.push(c),
+                // Not an escape: a hand-typed path like "D:\ML\clips".
+                other => {
+                    out.push('\\');
+                    out.push(other);
+                }
             },
             _ => out.push(c),
         }
@@ -331,6 +350,13 @@ fps = nope
         assert_eq!(cfg.hotkey_modifiers, 3);
         assert_eq!(cfg.save_folder, r"C:\Users\you\Videos\Bufferless");
         assert_eq!(cfg.fps, Config::default().fps);
+    }
+
+    #[test]
+    fn keeps_unescaped_backslashes_in_hand_typed_paths() {
+        let mut cfg = Config::default();
+        cfg.parse(r#"buffer_folder = "D:\ML\jarvis-clip\buffer""#);
+        assert_eq!(cfg.buffer_folder, r"D:\ML\jarvis-clip\buffer");
     }
 
     #[test]

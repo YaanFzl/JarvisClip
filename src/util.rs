@@ -255,7 +255,7 @@ pub fn foreground_app_name() -> String {
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
         let name = process_path(pid).map(|p| crate::rt::path::file_stem(&p).to_string());
         match name.as_deref() {
-            None | Some("explorer") | Some("bufferless") => "Desktop".into(),
+            None | Some("explorer") | Some("jarvis-clip") => "Desktop".into(),
             Some(n) => n.chars().filter(|c| !r#"<>:"/\|?*"#.contains(*c)).collect(),
         }
     }
@@ -296,13 +296,13 @@ pub fn set_autostart(enable: bool) {
             let _ = RegSetKeyValueW(
                 HKEY_CURRENT_USER,
                 key,
-                w!("Bufferless"),
+                w!("Jarvis Clip"),
                 REG_SZ.0,
                 Some(value.as_ptr() as _),
                 (value.len() * 2) as u32,
             );
         } else {
-            let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, key, w!("Bufferless"));
+            let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, key, w!("Jarvis Clip"));
         }
     }
 }

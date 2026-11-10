@@ -1,6 +1,9 @@
-//! In-memory replay buffer of *encoded* packets. Saving a clip never re-encodes,
-//! it just copies packets from the last keyframe before the requested start.
-//! While a recording is running, new packets are also queued up for it.
+//! Replay buffer of *encoded* packets. Saving a clip never re-encodes, it just
+//! copies packets from the last keyframe before the requested start. While a
+//! recording is running, new packets are also queued up for it.
+//!
+//! With `spool_to`, packet data goes to temp files on disk and only a small
+//! index stays in memory; otherwise everything is kept in RAM.
 
 use crate::prelude::*;
 
@@ -8,6 +11,8 @@ use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 
 use crate::clock::SECOND;
+use crate::log;
+use crate::rt::{fs, path};
 
 pub struct Packet {
     /// Presentation time on the shared clock, 100ns units.
@@ -33,6 +38,26 @@ pub struct Clip {
     pub audio_names: Vec<String>,
 }
 
+/// A clip's packets, still where the ring keeps them. `load` reads them in;
+/// call it off the UI thread, since that can mean reading spool files.
+pub struct Snapshot {
+    format: VideoFormat,
+    video: Vec<Arc<Slot>>,
+    audio: Vec<Vec<Arc<Slot>>>,
+    audio_names: Vec<String>,
+}
+
+impl Snapshot {
+    pub fn load(self) -> Result<Clip, String> {
+        let load = |slots: &[Arc<Slot>]| {
+            slots.iter().map(|s| s.packet()).collect::<Option<Vec<_>>>().ok_or("couldn't read the replay buffer back from disk")
+        };
+        let video = load(&self.video)?;
+        let audio = self.audio.iter().map(|a| load(a)).collect::<Result<_, _>>()?;
+        Ok(Clip { format: self.format, video, audio, audio_names: self.audio_names })
+    }
+}
+
 /// Packets an ongoing recording hasn't written yet.
 #[derive(Default)]
 pub struct Recorded {
@@ -45,22 +70,154 @@ pub struct Recorded {
     pub ended: bool,
 }
 
+/// The ring's own queue for a recording, before the data is read back.
+#[derive(Default)]
+struct Queued {
+    video: Vec<Arc<Slot>>,
+    audio: Vec<(usize, Arc<Slot>)>,
+    ended: bool,
+}
+
+/// A packet as the ring holds it.
+pub struct Slot {
+    pts: i64,
+    key: bool,
+    len: usize,
+    data: Stored,
+}
+
+enum Stored {
+    Memory(Arc<Packet>),
+    /// Offset in a spool file. The file deletes itself once no slot uses it.
+    Disk(Arc<Spool>, u64),
+}
+
+impl Slot {
+    fn packet(&self) -> Option<Arc<Packet>> {
+        match &self.data {
+            Stored::Memory(p) => Some(p.clone()),
+            Stored::Disk(spool, at) => {
+                let data = spool.read(*at, self.len)?;
+                Some(Arc::new(Packet { pts: self.pts, key: self.key, data }))
+            }
+        }
+    }
+}
+
+/// A temp file of packet data. Opened delete-on-close, so Windows removes it
+/// when the last slot in it is dropped, and also if the app exits or crashes.
+pub struct Spool(std::fs::File);
+
+impl Spool {
+    fn create(path: &str) -> std::io::Result<Self> {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_ATTRIBUTE_TEMPORARY: u32 = 0x100;
+        const FILE_FLAG_DELETE_ON_CLOSE: u32 = 0x0400_0000;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .attributes(FILE_ATTRIBUTE_TEMPORARY)
+            .custom_flags(FILE_FLAG_DELETE_ON_CLOSE)
+            .open(path)
+            .map(Self)
+    }
+
+    fn write(&self, mut at: u64, mut data: &[u8]) -> std::io::Result<()> {
+        use std::os::windows::fs::FileExt;
+        while !data.is_empty() {
+            let n = self.0.seek_write(data, at)?;
+            if n == 0 {
+                return Err(std::io::ErrorKind::WriteZero.into());
+            }
+            data = &data[n..];
+            at += n as u64;
+        }
+        Ok(())
+    }
+
+    fn read(&self, mut at: u64, len: usize) -> Option<Vec<u8>> {
+        use std::os::windows::fs::FileExt;
+        let mut buf = vec![0; len];
+        let mut done = 0;
+        while done < len {
+            match self.0.seek_read(&mut buf[done..], at) {
+                Ok(0) | Err(_) => return None,
+                Ok(n) => {
+                    done += n;
+                    at += n as u64;
+                }
+            }
+        }
+        Some(buf)
+    }
+}
+
+/// A new spool file every few seconds, so old footage is deleted in chunks
+/// as it ages out of the buffer.
+const SPOOL_FILE_SECONDS: i64 = 5;
+
+struct Spooler {
+    dir: String,
+    /// The file being appended to, its length, and its first packet's pts.
+    current: Option<(Arc<Spool>, u64, i64)>,
+    next_id: u64,
+}
+
+impl Spooler {
+    fn write(&mut self, pts: i64, data: &[u8]) -> std::io::Result<(Arc<Spool>, u64)> {
+        if self.current.as_ref().is_none_or(|(_, _, first)| pts - first >= SPOOL_FILE_SECONDS * SECOND) {
+            self.next_id += 1;
+            let file = path::join(&self.dir, &format!("spool-{}.bin", self.next_id));
+            self.current = Some((Arc::new(Spool::create(&file)?), 0, pts));
+        }
+        let (spool, len, _) = self.current.as_mut().unwrap();
+        spool.write(*len, data)?;
+        let at = *len;
+        *len += data.len() as u64;
+        Ok((spool.clone(), at))
+    }
+}
+
 #[derive(Default)]
 pub struct Ring {
-    video: VecDeque<Arc<Packet>>,
-    audio: Vec<VecDeque<Arc<Packet>>>,
+    video: VecDeque<Arc<Slot>>,
+    audio: Vec<VecDeque<Arc<Slot>>>,
     audio_names: Vec<String>,
     format: Option<VideoFormat>,
     /// How much history to keep, 100ns units.
     keep: i64,
     bytes: usize,
-    recording: Option<Recorded>,
+    recording: Option<Queued>,
+    spooler: Option<Spooler>,
 }
 
 impl Ring {
     pub fn new(seconds: u32) -> Self {
         // A couple of seconds of slack so we can always start on a keyframe.
         Self { keep: (seconds as i64 + 3) * SECOND, ..Default::default() }
+    }
+
+    /// Where new packets go: temp files under `dir`, or RAM if `dir` is empty.
+    /// Packets already buffered stay where they are until they age out.
+    pub fn set_spool(&mut self, dir: &str) {
+        if dir.is_empty() {
+            self.spooler = None;
+        } else if self.spooler.as_ref().is_none_or(|s| s.dir != dir) {
+            self.spool_to(dir);
+        }
+    }
+
+    /// Keep packet data in temp files under `dir` instead of in memory.
+    fn spool_to(&mut self, dir: &str) {
+        match fs::create_dir_all(dir) {
+            Ok(()) => {
+                log!("replay buffer on disk in {dir}");
+                self.spooler = Some(Spooler { dir: dir.into(), current: None, next_id: 0 });
+            }
+            Err(e) => log!("can't use {dir} for the replay buffer ({e}), keeping it in memory"),
+        }
     }
 
     pub fn set_keep(&mut self, seconds: u32) {
@@ -96,24 +253,40 @@ impl Ring {
         }
     }
 
+    /// Wrap a packet for the ring, writing its data out when spooling.
+    fn slot(&mut self, p: Packet) -> Arc<Slot> {
+        let (pts, key, len) = (p.pts, p.key, p.data.len());
+        let data = match self.spooler.as_mut().map(|s| s.write(pts, &p.data)) {
+            Some(Ok((spool, at))) => Stored::Disk(spool, at),
+            Some(Err(e)) => {
+                log!("replay buffer disk write failed ({e}), keeping it in memory from now on");
+                self.spooler = None;
+                Stored::Memory(Arc::new(p))
+            }
+            None => Stored::Memory(Arc::new(p)),
+        };
+        self.bytes += len;
+        Arc::new(Slot { pts, key, len, data })
+    }
+
     pub fn push_video(&mut self, p: Packet) {
-        self.bytes += p.data.len();
-        let p = Arc::new(p);
+        let s = self.slot(p);
         if let Some(r) = self.recording.as_mut().filter(|r| !r.ended) {
-            r.video.push(p.clone());
+            r.video.push(s.clone());
         }
-        self.video.push_back(p);
+        self.video.push_back(s);
         self.trim();
     }
 
     pub fn push_audio(&mut self, track: usize, p: Packet) {
-        let Some(queue) = self.audio.get_mut(track) else { return };
-        self.bytes += p.data.len();
-        let p = Arc::new(p);
-        if let Some(r) = self.recording.as_mut().filter(|r| !r.ended) {
-            r.audio.push((track, p.clone()));
+        if track >= self.audio.len() {
+            return;
         }
-        queue.push_back(p);
+        let s = self.slot(p);
+        if let Some(r) = self.recording.as_mut().filter(|r| !r.ended) {
+            r.audio.push((track, s.clone()));
+        }
+        self.audio[track].push_back(s);
         self.trim();
     }
 
@@ -165,20 +338,20 @@ impl Ring {
         for queue in &mut self.audio {
             while queue.front().is_some_and(|p| p.pts < audio_cutoff) {
                 let p = queue.pop_front().unwrap();
-                self.bytes -= p.data.len();
+                self.bytes -= p.len;
             }
         }
     }
 
     fn pop_video(&mut self, n: usize) {
         for p in self.video.drain(..n) {
-            self.bytes -= p.data.len();
+            self.bytes -= p.len;
         }
     }
 
     /// Grab the last `seconds` of footage, starting at the closest keyframe at
     /// or before the requested start.
-    pub fn snapshot(&self, seconds: u32) -> Option<Clip> {
+    pub fn snapshot(&self, seconds: u32) -> Option<Snapshot> {
         let format = self.format.clone()?;
         let newest = self.video.back()?.pts;
         let start = newest - seconds as i64 * SECOND;
@@ -194,13 +367,13 @@ impl Ring {
             .iter()
             .map(|a| a.iter().filter(|p| p.pts >= t0 && p.pts <= newest).cloned().collect())
             .collect();
-        Some(Clip { format, video, audio, audio_names: self.audio_names.clone() })
+        Some(Snapshot { format, video, audio, audio_names: self.audio_names.clone() })
     }
 
     /// Start queueing packets for a recording, beginning at the newest
     /// keyframe so the file can start right away.
     pub fn start_recording(&mut self) {
-        let mut r = Recorded::default();
+        let mut r = Queued::default();
         if let Some(first) = self.video.iter().rposition(|p| p.key) {
             let t0 = self.video[first].pts;
             r.video = self.video.iter().skip(first).cloned().collect();
@@ -215,12 +388,13 @@ impl Ring {
     pub fn take_recorded(&mut self) -> Recorded {
         let format = self.format.clone();
         match self.recording.as_mut() {
-            Some(r) => Recorded {
-                format,
-                video: core::mem::take(&mut r.video),
-                audio: core::mem::take(&mut r.audio),
-                ended: r.ended,
-            },
+            Some(r) => {
+                // A packet that can't be read back is skipped rather than
+                // ending the whole recording.
+                let video = core::mem::take(&mut r.video).iter().filter_map(|s| s.packet()).collect();
+                let audio = core::mem::take(&mut r.audio).iter().filter_map(|(t, s)| Some((*t, s.packet()?))).collect();
+                Recorded { format, video, audio, ended: r.ended }
+            }
             None => Recorded { ended: true, ..Default::default() },
         }
     }
@@ -287,5 +461,32 @@ mod tests {
 
         ring.clear();
         assert!(ring.take_recorded().ended);
+    }
+
+    #[test]
+    fn spools_to_disk_reads_back_and_deletes_old_files() {
+        let dir = std::env::temp_dir().join("jarvis-ring-test").to_string_lossy().into_owned();
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut ring = ring(10);
+        ring.set_format(VideoFormat { width: 2, height: 2, fps: 10, seq_header: Vec::new() });
+        ring.spool_to(&dir);
+        // Every packet's bytes encode its index, so read-back mixups show.
+        for i in 0..400i64 {
+            let data = (i as u32).to_le_bytes().repeat(25);
+            ring.push_video(Packet { pts: i * SECOND / 10, key: i % 10 == 0, data });
+        }
+        let clip = ring.snapshot(5).unwrap().load().unwrap();
+        for p in &clip.video {
+            let i = (p.pts * 10 / SECOND) as u32;
+            assert_eq!(p.data, i.to_le_bytes().repeat(25));
+        }
+        assert!(clip.video.len() >= 50);
+        // 40 s pushed, ~13 s kept: old 5 s files are gone, not piling up.
+        let files = || std::fs::read_dir(&dir).unwrap().count();
+        assert!(files() <= 5, "{} spool files left", files());
+        drop(clip);
+        ring.clear();
+        ring.spooler = None; // closes the file still being written
+        assert_eq!(files(), 0);
     }
 }

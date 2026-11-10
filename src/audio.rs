@@ -144,11 +144,11 @@ pub struct DeviceInfo {
     pub name: String,
 }
 
-fn enumerator() -> Result<IMMDeviceEnumerator> {
+pub(crate) fn enumerator() -> Result<IMMDeviceEnumerator> {
     unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }
 }
 
-fn device_id(d: &IMMDevice) -> String {
+pub(crate) fn device_id(d: &IMMDevice) -> String {
     unsafe {
         d.GetId()
             .map(|p| {
@@ -210,7 +210,7 @@ pub fn apps_with_audio() -> Vec<String> {
                 }
                 let Some(exe) = crate::util::process_path(pid) else { continue };
                 let exe = crate::rt::path::file_name(&exe).to_string();
-                if !exe.eq_ignore_ascii_case("bufferless.exe")
+                if !exe.eq_ignore_ascii_case("jarvis-clip.exe")
                     && !out.iter().any(|o| o.eq_ignore_ascii_case(&exe))
                 {
                     out.push(exe);
@@ -258,7 +258,7 @@ struct Source {
 }
 
 /// Ask WASAPI to hand us 48k stereo float whatever the device runs at.
-fn start_client(client: &IAudioClient, loopback: bool) -> Result<IAudioCaptureClient> {
+pub(crate) fn start_client(client: &IAudioClient, loopback: bool) -> Result<IAudioCaptureClient> {
     let format = WAVEFORMATEXTENSIBLE {
         Format: WAVEFORMATEX {
             wFormatTag: WAVE_FORMAT_EXTENSIBLE as u16,

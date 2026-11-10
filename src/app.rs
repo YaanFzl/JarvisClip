@@ -10,7 +10,7 @@ use crate::rt::Mutex;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Input::KeyboardAndMouse::{HOT_KEY_MODIFIERS, MOD_NOREPEAT, RegisterHotKey, UnregisterHotKey};
+use windows::Win32::UI::Input::KeyboardAndMouse::{HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, RegisterHotKey, UnregisterHotKey};
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, w};
@@ -21,24 +21,33 @@ use crate::record::{self, Recording};
 use crate::ring::Ring;
 use crate::rt::{self, UiCell, fs, path};
 use crate::util::{copy_wide, hotkey_name, wide};
-use crate::{clock, icon, log, mux, settings, theme, util};
+use crate::{capture, clock, icon, log, mux, settings, theme, ui, util, voice};
 
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_CLIP_SAVED: u32 = WM_APP + 2;
 /// Posted by a second instance to ask us to show settings.
 pub const WM_SHOW_SETTINGS: u32 = WM_APP + 3;
 const WM_RECORDING_SAVED: u32 = WM_APP + 4;
-pub const WINDOW_CLASS: PCWSTR = w!("BufferlessTrayWindow");
+/// A voice command was heard; wParam = command index (see voice.rs).
+const WM_VOICE: u32 = WM_APP + 5;
+pub const WINDOW_CLASS: PCWSTR = w!("JarvisClipTrayWindow");
 
 const HOTKEY_SAVE: i32 = 1;
 const HOTKEY_RECORD: i32 = 2;
+/// Ctrl+Alt+J: open the control window. The way in when the tray icon can't show.
+const HOTKEY_OPEN: i32 = 3;
 const TIMER_STATUS: usize = 1;
+/// Fires once, a moment after "jarvis clip that", to save the clip.
+const TIMER_VOICE_CLIP: usize = 2;
+/// Keep recording this long after the phrase, so the clip doesn't cut off on it.
+const VOICE_CLIP_DELAY_MS: u32 = 2500;
 
 const CMD_SAVE: usize = 100;
 const CMD_OPEN_FOLDER: usize = 101;
 const CMD_SETTINGS: usize = 102;
 const CMD_QUIT: usize = 103;
 const CMD_RECORD: usize = 104;
+const CMD_OPEN: usize = 105;
 
 struct TrayIcons {
     ok: HICON,
@@ -92,10 +101,6 @@ fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
     APP.with(|a| a.borrow_mut().as_mut().map(f))
 }
 
-pub fn current_config() -> Config {
-    with_app(|a| a.cfg.clone()).unwrap_or_default()
-}
-
 pub fn run(first_run: bool) {
     unsafe {
         let instance = GetModuleHandleW(None).unwrap();
@@ -111,7 +116,7 @@ pub fn run(first_run: bool) {
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE::default(),
             WINDOW_CLASS,
-            w!("Bufferless"),
+            w!("Jarvis Clip"),
             WS_OVERLAPPED,
             0,
             0,
@@ -134,8 +139,16 @@ pub fn run(first_run: bool) {
             let _ = cfg.save();
         }
         theme::set_menu_theme(theme::is_dark(cfg.theme));
-        let ring = Arc::new(Mutex::new(Ring::new(cfg.replay_seconds)));
+        let mut ring = Ring::new(cfg.replay_seconds);
+        ring.set_spool(&cfg.buffer_folder);
+        let ring = Arc::new(Mutex::new(ring));
         let pipeline = Pipeline::start(&cfg, ring.clone());
+        if cfg.voice {
+            // JARVIS_VOICE_WAV: listen to a .wav file instead of the mic (testing).
+            let wav = std::env::var("JARVIS_VOICE_WAV").ok();
+            let dir = path::join(&Config::dir(), "vosk");
+            voice::start(hwnd, WM_VOICE, cfg.voice_min_confidence, dir, wav);
+        }
         let app = App {
             hwnd,
             ring,
@@ -156,9 +169,9 @@ pub fn run(first_run: bool) {
             a.register_hotkeys();
             if first_run && a.hotkey_ok {
                 a.notify(
-                    "Bufferless is running",
+                    "Jarvis Clip is running",
                     &format!(
-                        "Press {} to save the last {} seconds. Right-click the tray icon for settings.",
+                        "Say \"jarvis clip that\" or press {} to save the last {} seconds. Double-click the tray icon to open Jarvis Clip.",
                         hotkey_name(a.cfg.hotkey_modifiers, a.cfg.hotkey_key),
                         a.cfg.replay_seconds
                     ),
@@ -212,7 +225,10 @@ impl App {
         copy_wide(&mut nid.szTip, &self.tooltip());
         nid.Anonymous.uVersion = NOTIFYICON_VERSION_4;
         unsafe {
-            let _ = Shell_NotifyIconW(NIM_ADD, &nid);
+            if !Shell_NotifyIconW(NIM_ADD, &nid).as_bool() {
+                let err = windows::Win32::Foundation::GetLastError();
+                log!("tray: couldn't add the icon ({err:?}; run jarvis-clip.exe again to open the window)");
+            }
             let _ = Shell_NotifyIconW(NIM_SETVERSION, &nid);
         }
     }
@@ -233,7 +249,7 @@ impl App {
         // but a clip is never longer than the replay length.
         let buffered = buffered.min(self.cfg.replay_seconds);
         let mut tip =
-            format!("Bufferless\n{status}\n{buffered}s of {}s buffered ({} MB)", self.cfg.replay_seconds, bytes / 1_000_000);
+            format!("Jarvis Clip\n{status}\n{buffered}s of {}s buffered ({} MB)", self.cfg.replay_seconds, bytes / 1_000_000);
         if let Some(r) = &self.recording {
             let s = r.seconds();
             tip = format!("{tip}\nRecording to a file: {}:{:02}", s / 60, s % 60);
@@ -279,6 +295,9 @@ impl App {
         };
         self.hotkey_ok = register(HOTKEY_SAVE, self.cfg.hotkey_modifiers, self.cfg.hotkey_key);
         self.record_hotkey_ok = register(HOTKEY_RECORD, self.cfg.record_hotkey_modifiers, self.cfg.record_hotkey_key);
+        if !register(HOTKEY_OPEN, (MOD_CONTROL | MOD_ALT).0, u32::from(b'J')) {
+            log!("hotkey Ctrl+Alt+J is taken");
+        }
         let mut taken = Vec::new();
         if !self.hotkey_ok {
             taken.push(hotkey_name(self.cfg.hotkey_modifiers, self.cfg.hotkey_key));
@@ -308,13 +327,16 @@ impl App {
         let hwnd = self.hwnd.0 as usize;
         rt::thread::spawn("save", move || {
             let start = clock::now();
-            let result = fs::create_dir_all(&folder)
-                .and_then(|_| {
-                    // Two saves within the same second shouldn't overwrite each other.
-                    let path = record::unused_path(&folder, &stem);
-                    mux::write_mp4(&path, &clip).map(|size| (path, size))
-                })
-                .map_err(|e| e.to_string());
+            // Reading the packets back can mean reading the spool files on disk.
+            let result = clip.load().and_then(|clip| {
+                fs::create_dir_all(&folder)
+                    .and_then(|_| {
+                        // Two saves within the same second shouldn't overwrite each other.
+                        let path = record::unused_path(&folder, &stem);
+                        mux::write_mp4(&path, &clip).map(|size| (path, size))
+                    })
+                    .map_err(|e| e.to_string())
+            });
             match &result {
                 Ok((p, size)) => log!("saved {p} ({size} bytes) in {} ms", (clock::now() - start) / 10_000),
                 Err(e) => log!("save failed: {e}"),
@@ -340,6 +362,18 @@ impl App {
                 util::play_error_sound();
                 self.notify("Couldn't save clip", &e);
             }
+        }
+    }
+
+    fn on_voice(&mut self, command: voice::Command) {
+        let recording = self.recording.as_ref().map(|r| r.stopping());
+        match (command, recording) {
+            // Saved a moment later (see TIMER_VOICE_CLIP), not mid-sentence.
+            (voice::Command::Clip, _) => unsafe {
+                SetTimer(Some(self.hwnd), TIMER_VOICE_CLIP, VOICE_CLIP_DELAY_MS, None);
+            },
+            (voice::Command::Record, None) | (voice::Command::Stop, Some(false)) => self.toggle_recording(),
+            _ => {} // already recording / nothing to stop
         }
     }
 
@@ -457,8 +491,192 @@ impl App {
         if old.theme != self.cfg.theme {
             theme::set_menu_theme(theme::is_dark(self.cfg.theme));
         }
+        if old.buffer_folder != self.cfg.buffer_folder {
+            self.ring.lock().set_spool(&self.cfg.buffer_folder);
+        }
+        voice::set_min_confidence(self.cfg.voice_min_confidence);
         self.refresh_tray();
     }
+
+    /// Everything the control window shows, as JSON. `full` adds the option
+    /// lists (monitors etc.), which rarely change.
+    fn ui_state(&self, full: bool) -> String {
+        use ui::json_str as s;
+        let c = &self.cfg;
+        let status = self.pipeline.as_ref().map(|p| p.status()).unwrap_or_default();
+        let (buffered, bytes) = {
+            let ring = self.ring.lock();
+            (ring.seconds().min(c.replay_seconds), ring.bytes())
+        };
+        let recording = match &self.recording {
+            Some(r) => format!("{{\"seconds\":{},\"stopping\":{}}}", r.seconds(), r.stopping()),
+            None => "null".into(),
+        };
+        let (voice_state, heard) = voice::status();
+        let now = clock::now();
+        let heard: Vec<String> = heard
+            .iter()
+            .map(|h| {
+                let ago = (now - h.at) / clock::SECOND;
+                format!("{{\"id\":{},\"text\":{},\"percent\":{},\"accepted\":{},\"ago\":{ago}}}", h.id, s(&h.text), h.percent, h.accepted)
+            })
+            .collect();
+        let phrases: Vec<String> = voice::PHRASES.iter().map(|(_, p)| s(p[0])).collect();
+        let clips: Vec<String> = list_clips(&c.save_folder)
+            .iter()
+            .map(|(name, size, time)| format!("{{\"name\":{},\"size\":{size},\"time\":{time}}}", s(name)))
+            .collect();
+        let config = format!(
+            "{{\"save_folder\":{},\"buffer_folder\":{},\"replay_seconds\":{},\"fps\":{},\"resolution\":{},\"bitrate_mbps\":{},\"monitor\":{},\"system_audio\":{},\"microphone\":{},\"capture_cursor\":{},\"voice\":{},\"voice_min_confidence\":{},\"save_sound\":{},\"notifications\":{},\"start_with_windows\":{}}}",
+            s(&c.save_folder),
+            s(&c.buffer_folder),
+            c.replay_seconds,
+            c.fps,
+            c.resolution,
+            c.bitrate_mbps,
+            c.monitor,
+            c.system_audio,
+            c.microphone,
+            c.capture_cursor,
+            c.voice,
+            c.voice_min_confidence,
+            c.save_sound,
+            c.notifications,
+            c.start_with_windows
+        );
+        let options = if full {
+            let pairs = |v: &[(u32, &str)]| v.iter().map(|(n, l)| format!("[{n},{}]", s(l))).collect::<Vec<_>>().join(",");
+            let monitors: Vec<String> =
+                capture::list_monitors().iter().map(|m| s(&format!("{} · {}×{}", m.name, m.width, m.height))).collect();
+            format!(
+                ",\"options\":{{\"lengths\":[{}],\"resolutions\":[{}],\"fps\":{:?},\"monitors\":[{}],\"defaultBuffer\":{}}}",
+                pairs(&settings::LENGTHS),
+                pairs(&settings::RESOLUTIONS),
+                settings::FRAME_RATES,
+                monitors.join(","),
+                s(&Config::default().buffer_folder)
+            )
+        } else {
+            String::new()
+        };
+        format!(
+            "{{\"status\":{},\"buffered\":{buffered},\"bufferBytes\":{bytes},\"recording\":{recording},\"voice\":{{\"state\":{},\"heard\":[{}],\"phrases\":[{}]}},\"hotkeys\":{{\"clip\":{},\"record\":{}}},\"estimateMb\":{},\"config\":{config},\"clips\":[{}]{options}}}",
+            s(&status),
+            s(&voice_state),
+            heard.join(","),
+            phrases.join(","),
+            s(&hotkey_name(c.hotkey_modifiers, c.hotkey_key)),
+            s(&hotkey_name(c.record_hotkey_modifiers, c.record_hotkey_key)),
+            c.estimated_memory_mb(),
+            clips.join(",")
+        )
+    }
+}
+
+/// Newest clips and recordings in `folder`: (name, bytes, modified unix time).
+fn list_clips(folder: &str) -> Vec<(String, u64, u64)> {
+    let Ok(dir) = std::fs::read_dir(folder) else { return Vec::new() };
+    let mut clips: Vec<_> = dir
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            if !name.to_ascii_lowercase().ends_with(".mp4") {
+                return None;
+            }
+            let meta = e.metadata().ok()?;
+            let time = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+            Some((name, meta.len(), time))
+        })
+        .collect();
+    clips.sort_by(|a, b| b.2.cmp(&a.2));
+    clips.truncate(24);
+    clips
+}
+
+/// Like `with_app`, but None instead of a panic when the app is already
+/// borrowed further up the stack (a sent message arriving mid-call).
+fn try_with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
+    APP.with(|a| a.try_borrow_mut().ok()?.as_mut().map(f))
+}
+
+/// A request from the control window (ui.rs). Dialogs and shell calls run
+/// with the app not borrowed, since they pump messages.
+fn handle_ui_request(req: &mut ui::Request) {
+    use ui::Response;
+    let state = |full: bool| try_with_app(|a| a.ui_state(full)).map_or(Response::Busy, Response::Json);
+    // Only plain .mp4 names inside the clips folder.
+    let clip_path = |name: &str| -> Option<String> {
+        let plain = !name.contains(['/', '\\', ':']) && !name.contains("..") && name.to_ascii_lowercase().ends_with(".mp4");
+        let p = path::join(&try_with_app(|a| a.cfg.save_folder.clone())?, name);
+        (plain && fs::exists(&p)).then_some(p)
+    };
+    let name = ui::query_value(&req.query, "name").unwrap_or_default();
+    req.response = match (req.method.as_str(), req.path.as_str()) {
+        ("GET", "api/state") => state(req.query.contains("full")),
+        ("POST", "api/config") => {
+            let body = core::mem::take(&mut req.body);
+            let applied = try_with_app(|a| {
+                let mut new = a.cfg.clone();
+                new.parse(&body);
+                new.sanitize();
+                a.apply(new);
+            });
+            if applied.is_some() { state(true) } else { Response::Busy }
+        }
+        ("POST", "api/clip") => {
+            try_with_app(|a| a.save_clip());
+            state(false)
+        }
+        ("POST", "api/record") => {
+            try_with_app(|a| a.toggle_recording());
+            state(false)
+        }
+        ("POST", "api/pick") => {
+            let buffer = ui::query_value(&req.query, "for").as_deref() == Some("buffer");
+            let current = try_with_app(|a| if buffer { a.cfg.buffer_folder.clone() } else { a.cfg.save_folder.clone() });
+            // Owned by the control window, so the dialog opens on top of it.
+            let owner = unsafe { GetForegroundWindow() };
+            if let Some(dir) = settings::browse(owner, &current.unwrap_or_default(), true) {
+                try_with_app(|a| {
+                    let mut new = a.cfg.clone();
+                    if buffer { new.buffer_folder = dir } else { new.save_folder = dir }
+                    a.apply(new);
+                });
+            }
+            state(true)
+        }
+        ("POST", "api/play") => match clip_path(&name) {
+            Some(p) => {
+                let p = wide(&p);
+                unsafe { ShellExecuteW(None, w!("open"), PCWSTR(p.as_ptr()), None, None, SW_SHOWNORMAL) };
+                state(false)
+            }
+            None => Response::NotFound,
+        },
+        ("POST", "api/reveal") => match try_with_app(|a| a.cfg.save_folder.clone()) {
+            Some(folder) => {
+                open_folder(&folder, clip_path(&name).as_ref());
+                state(false)
+            }
+            None => Response::Busy,
+        },
+        ("POST", "api/quit") => {
+            // Posted, so the page gets its answer before the app goes away.
+            if let Some(hwnd) = try_with_app(|a| a.hwnd) {
+                unsafe { let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)); }
+            }
+            Response::Json("{}".into())
+        }
+        ("POST", "api/classic") => match try_with_app(|a| a.cfg.clone()) {
+            Some(cfg) => {
+                settings::open(cfg);
+                state(false)
+            }
+            None => Response::Busy,
+        },
+        ("GET", p) if p.starts_with("clip/") => clip_path(&p[5..]).map_or(Response::NotFound, Response::File),
+        _ => Response::NotFound,
+    };
 }
 
 /// Called by the settings window when the user hits Save.
@@ -479,7 +697,11 @@ fn handle_command(cmd: usize) {
                 open_folder(&folder, None);
             }
         }
-        CMD_SETTINGS => settings::open(current_config()),
+        CMD_OPEN | CMD_SETTINGS => {
+            if let Some(hwnd) = with_app(|a| a.hwnd) {
+                ui::open(hwnd);
+            }
+        }
         CMD_QUIT => unsafe { PostQuitMessage(0) },
         _ => {}
     }
@@ -491,8 +713,23 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             with_app(|a| a.save_clip());
             LRESULT(0)
         }
+        WM_HOTKEY if wparam.0 as i32 == HOTKEY_OPEN => {
+            ui::open(hwnd);
+            LRESULT(0)
+        }
         WM_HOTKEY if wparam.0 as i32 == HOTKEY_RECORD => {
             with_app(|a| a.toggle_recording());
+            LRESULT(0)
+        }
+        WM_VOICE => {
+            if let Some(command) = voice::Command::from_index(wparam.0) {
+                with_app(|a| a.on_voice(command));
+            }
+            LRESULT(0)
+        }
+        ui::WM_UI_REQUEST => {
+            // Sent (not posted) by the ui server thread, which waits for the answer.
+            handle_ui_request(unsafe { &mut *(lparam.0 as *mut ui::Request) });
             LRESULT(0)
         }
         WM_TRAY => {
@@ -507,7 +744,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         handle_command(show_menu(hwnd, &cfg, recording));
                     }
                 }
-                WM_LBUTTONDBLCLK => settings::open(current_config()),
+                WM_LBUTTONDBLCLK => ui::open(hwnd),
                 NIN_BALLOONUSERCLICK => {
                     if let Some((folder, clip)) = with_app(|a| (a.cfg.save_folder.clone(), a.last_clip.clone())) {
                         open_folder(&folder, clip.as_ref());
@@ -528,7 +765,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_SHOW_SETTINGS => {
-            settings::open(current_config());
+            ui::open(hwnd);
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == TIMER_VOICE_CLIP => {
+            let _ = unsafe { KillTimer(Some(hwnd), TIMER_VOICE_CLIP) };
+            with_app(|a| a.save_clip());
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == TIMER_STATUS => {
@@ -573,6 +815,8 @@ fn show_menu(hwnd: HWND, cfg: &Config, recording: Option<bool>) -> usize {
             Some(true) => ("Saving recording...".to_string(), MF_STRING | MF_GRAYED),
         };
         let items = [
+            (CMD_OPEN, "Open Jarvis Clip", MF_STRING),
+            (0, "", MF_SEPARATOR),
             (CMD_SAVE, save_label.as_str(), MF_STRING),
             (CMD_RECORD, record_label.as_str(), record_flags),
             (CMD_OPEN_FOLDER, "Open clips folder", MF_STRING),
@@ -588,7 +832,7 @@ fn show_menu(hwnd: HWND, cfg: &Config, recording: Option<bool>) -> usize {
                 let _ = AppendMenuW(menu, flags, id, PCWSTR(text.as_ptr()));
             }
         }
-        let _ = SetMenuDefaultItem(menu, CMD_SAVE as u32, 0);
+        let _ = SetMenuDefaultItem(menu, CMD_OPEN as u32, 0);
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
         // Required so the menu closes when clicking elsewhere.

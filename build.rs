@@ -27,6 +27,24 @@ fn main() {
     println!("cargo:rerun-if-changed={}", manifest.display());
     println!("cargo:rerun-if-changed=src/icon.rs");
 
+    // GNU toolchain: GNU ld can't take a .res, so the manifest goes into the
+    // .res as well and binutils' windres (on PATH, see build.sh) turns it into
+    // an object file ld can link.
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc") {
+        let res = write_icon_res(Some(&std::fs::read(&manifest).unwrap()));
+        let obj = res.with_extension("o");
+        let ok = std::process::Command::new("windres")
+            .args(["-J", "res", "-O", "coff", "-i"])
+            .arg(&res)
+            .arg("-o")
+            .arg(&obj)
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(ok, "windres failed: put binutils on PATH (see build.sh)");
+        println!("cargo:rustc-link-arg-bins={}", obj.display());
+        return;
+    }
+
     // Embed the manifest and icon with the MSVC linker directly; no resource
     // compiler needed.
     println!("cargo:rustc-link-arg-bins=/MANIFEST:EMBED");
@@ -34,7 +52,7 @@ fn main() {
     if tiny {
         println!("cargo:rustc-link-arg-bins=/MANIFESTUAC:NO");
     }
-    let res = write_icon_res();
+    let res = write_icon_res(None);
     println!("cargo:rustc-link-arg-bins={}", res.display());
 }
 
@@ -71,7 +89,7 @@ fn resource(res: &mut Vec<u8>, kind: u16, id: u16, flags: u16, data: &[u8]) {
     }
 }
 
-fn write_icon_res() -> PathBuf {
+fn write_icon_res(manifest: Option<&[u8]>) -> PathBuf {
     let mut res = Vec::new();
     // A .res file starts with an empty entry.
     resource(&mut res, 0, 0, 0, &[]);
@@ -94,6 +112,10 @@ fn write_icon_res() -> PathBuf {
         group.extend_from_slice(&id.to_le_bytes());
     }
     resource(&mut res, RT_GROUP_ICON, ICON_GROUP_ID, 0x1030, &group);
+    if let Some(manifest) = manifest {
+        // RT_MANIFEST, id 1: the manifest Windows applies when the exe starts.
+        resource(&mut res, 24, 1, 0x1030, manifest);
+    }
 
     let path = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("icon.res");
     std::fs::write(&path, res).unwrap();
