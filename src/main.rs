@@ -67,7 +67,8 @@ fn main() {
 
         let dir = Config::dir();
         let _ = rt::fs::create_dir_all(&dir);
-        let first_run = !rt::fs::exists(&rt::path::join(&dir, "config.toml"));
+        // No log yet: first start (the installer may already have written a config).
+        let first_run = !rt::fs::exists(&rt::path::join(&dir, "jarvis-clip.log"));
         logging::init(&rt::path::join(&dir, "jarvis-clip.log"));
         log!("jarvis-clip {VERSION} starting");
 

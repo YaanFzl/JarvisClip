@@ -66,10 +66,39 @@ jobs:
       - name: Build
         run: cargo build --release
 
+      - name: Get the voice files
+        shell: pwsh
+        run: |
+          # Same files and hashes as DOWNLOADS in src/voice.rs.
+          $files = @(
+            @{ url = 'https://github.com/alphacep/vosk-api/releases/download/v0.3.45/vosk-win64-0.3.45.zip'; sha = 'f1dcc9cca460630f81ea8f71794f69c80bed6556d2a4e6237b5785e1d2dff34b' },
+            @{ url = 'https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip'; sha = '30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498' }
+          )
+          $work = Join-Path $env:RUNNER_TEMP vosk
+          New-Item -ItemType Directory -Force $work, dist/vosk | Out-Null
+          foreach ($f in $files) {
+            $zip = Join-Path $work download.zip
+            Invoke-WebRequest $f.url -OutFile $zip
+            if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne $f.sha) { throw "Checksum mismatch: $($f.url)" }
+            Expand-Archive $zip $work -Force
+          }
+          Move-Item "$work/vosk-win64-0.3.45/*.dll" dist/vosk
+          Move-Item "$work/vosk-model-small-en-us-0.15" dist/vosk/model
+
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup --no-progress -y }
+          & $iscc /Q "/DAppVersion=$env:JARVIS_CLIP_VERSION" installer.iss
+          if ($LASTEXITCODE) { throw 'Inno Setup failed' }
+
       - uses: actions/upload-artifact@v7
         with:
           name: jarvis-clip-${{ steps.version.outputs.version }}
-          path: target/release/jarvis-clip.exe
+          path: |
+            target/release/jarvis-clip.exe
+            dist/JarvisClip-Setup.exe
 
       - name: Publish release
         if: steps.version.outputs.release == 'true'
@@ -78,8 +107,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          notes="Put **jarvis-clip.exe** in a folder of its own and run it. The first run downloads the voice files (~55 MB, once)."
+          notes="- **JarvisClip-Setup.exe**: the installer. Includes the voice files, adds a Start Menu shortcut and an uninstaller. No admin needed.
+          - **jarvis-clip.exe**: the portable app. Put it in a folder of its own; the first run downloads the voice files (~55 MB, once)."
           # Creates the tag too when it doesn't exist yet. Tags made with the
           # workflow token don't trigger another run.
-          gh release create "$VERSION" target/release/jarvis-clip.exe \
+          gh release create "$VERSION" dist/JarvisClip-Setup.exe target/release/jarvis-clip.exe \
             --target "$GITHUB_SHA" --title "Jarvis Clip $VERSION" --notes "$notes" --generate-notes

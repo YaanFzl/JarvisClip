@@ -31,13 +31,18 @@ no account, no background services, and the speech recognition runs offline on y
   <img src="docs/steps.svg" alt="Step 1: run it, it sits in the tray. Step 2: play. Step 3: say &quot;jarvis clip that&quot; and the last 30 seconds are saved to the clips folder." width="100%">
 </p>
 
-1. **Download** `jarvis-clip.exe` from the [latest release](../../releases/latest) into a
-   folder of its own and run it. There's no installer. The first run fetches the
-   [voice files](#voice-files) (~55 MB, once).
+1. **Install:** download [`JarvisClip-Setup.exe`](../../releases/latest/download/JarvisClip-Setup.exe)
+   and run it. No admin needed, and the voice files are included.
 2. **Play**, stream, work, whatever. It's always keeping the last 30 seconds.
 3. **Say "jarvis clip that"**, or press **Alt+F10**. You'll hear a short chime, and the clip
-   lands in `clips\` next to the exe, named after whatever was on screen:
+   lands in `Videos\Jarvis Clip`, named after whatever was on screen:
    `valorant 2026-11-10 22-41-07.mp4`.
+
+Prefer portable? Grab [`jarvis-clip.exe`](../../releases/latest/download/jarvis-clip.exe)
+instead and put it in a folder of its own. It keeps everything in that folder (clips go to
+`clips\`) and downloads the [voice files](#voice-files) on its first run (~55 MB, once).
+
+To remove the installed version, use Windows' **Installed apps**. Your clips stay.
 
 Double-click the tray icon (or press **Ctrl+Alt+J**) to open the control window.
 
@@ -54,7 +59,8 @@ Double-click the tray icon (or press **Ctrl+Alt+J**) to open the control window.
 ### Voice files
 
 Voice commands use [Vosk](https://alphacephei.com/vosk/), which is too big to put in the
-exe. On the first run with voice on, Jarvis Clip downloads it from the official sources,
+exe. The installer includes it. The portable exe, on its first run with voice on,
+downloads it from the official sources,
 checks each download against a pinned SHA-256 hash, and unpacks it into a `vosk` folder
 next to the exe:
 
