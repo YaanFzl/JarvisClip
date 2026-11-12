@@ -94,6 +94,11 @@ commands. Close the window any time; the buffer keeps running in the tray.
 
 Your newest clips, with previews. Click one to play it right there.
 
+To keep only part of a clip, drag the two markers under the video (or press **I** and
+**O** at the playhead) and click **Save cut**. It saves `<name> cut.mp4` next to the
+original in a moment, without re-encoding, so the quality is untouched. The cut starts on
+the nearest keyframe, which can be up to a second before the start you picked.
+
 ## Settings
 
 <p align="center">

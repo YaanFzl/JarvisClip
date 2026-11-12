@@ -19,6 +19,7 @@ mod ring;
 mod rt;
 mod settings;
 mod theme;
+mod trim;
 mod util;
 mod ui;
 mod voice;

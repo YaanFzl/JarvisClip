@@ -21,7 +21,7 @@ use crate::record::{self, Recording};
 use crate::ring::Ring;
 use crate::rt::{self, UiCell, fs, path};
 use crate::util::{copy_wide, hotkey_name, wide};
-use crate::{capture, clock, icon, log, mux, settings, theme, ui, util, voice};
+use crate::{capture, clock, icon, log, mux, settings, theme, trim, ui, util, voice};
 
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_CLIP_SAVED: u32 = WM_APP + 2;
@@ -651,7 +651,12 @@ fn handle_ui_request(req: &mut ui::Request) {
     };
     let name = ui::query_value(&req.query, "name").unwrap_or_default();
     req.response = match (req.method.as_str(), req.path.as_str()) {
-        ("GET", "api/state") => state(req.query.contains("full")),
+        ("GET", "api/state") => {
+            if req.query.contains("full") {
+                try_with_app(|a| a.clips.borrow_mut().invalidate());
+            }
+            state(req.query.contains("full"))
+        }
         ("POST", "api/config") => {
             let body = core::mem::take(&mut req.body);
             let applied = try_with_app(|a| {
@@ -712,6 +717,28 @@ fn handle_ui_request(req: &mut ui::Request) {
                 state(false)
             }
             None => Response::Busy,
+        },
+        ("POST", "api/trim") => match clip_path(&name) {
+            Some(src) => {
+                let ms = |k| ui::query_value(&req.query, k).and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+                let (start, end) = (ms("start") * clock::SECOND / 1000, ms("end") * clock::SECOND / 1000);
+                // "<name> cut.mp4", then "<name> cut 2.mp4" and so on.
+                let stem = &src[..src.len() - 4];
+                let dst = (1..).map(|n| if n == 1 { format!("{stem} cut.mp4") } else { format!("{stem} cut {n}.mp4") })
+                    .find(|p| !fs::exists(p))
+                    .unwrap();
+                Response::Work(Box::new(move || match trim::trim(&src, &dst, start, end) {
+                    Ok(size) => {
+                        log!("trimmed {dst} ({size} bytes)");
+                        format!("{{\"name\":{}}}", ui::json_str(path::file_name(&dst)))
+                    }
+                    Err(e) => {
+                        log!("trim failed: {e}");
+                        format!("{{\"error\":{}}}", ui::json_str(&e))
+                    }
+                }))
+            }
+            None => Response::NotFound,
         },
         ("GET", p) if p.starts_with("clip/") => clip_path(&p[5..]).map_or(Response::NotFound, Response::File),
         _ => Response::NotFound,

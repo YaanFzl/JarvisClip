@@ -42,6 +42,9 @@ pub enum Response {
     Json(String),
     /// Stream this file (with Range support, for <video>).
     File(String),
+    /// Slow work, run on the server thread so the UI thread stays free.
+    /// Returns the JSON reply.
+    Work(Box<dyn FnOnce() -> String + Send>),
 }
 
 /// Open the control window (starting the server the first time).
@@ -176,6 +179,7 @@ fn handle(mut s: TcpStream, host: &str, prefix: &str, hwnd: usize) -> std::io::R
         Response::Busy => reply(&mut s, 503, "text/plain", b"busy"),
         Response::Json(json) => reply(&mut s, 200, "application/json", json.as_bytes()),
         Response::File(file) => send_file(&mut s, &file, header("range")),
+        Response::Work(work) => reply(&mut s, 200, "application/json", work().as_bytes()),
     }
 }
 

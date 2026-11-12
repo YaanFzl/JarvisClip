@@ -266,7 +266,22 @@ select {
 .pframe { width: min(1100px, 100%); transform: translateY(24px) scale(0.97); transition: transform 700ms var(--ease); }
 .player.open .pframe { transform: none; }
 .pframe .core { padding: 0; }
-.pframe video { display: block; width: 100%; max-height: calc(100dvh - 220px); background: #000; }
+.pframe video { display: block; width: 100%; max-height: calc(100dvh - 330px); background: #000; }
+/* Cutter */
+.trim { padding: 18px 18px 0; }
+.ttrack { position: relative; height: 34px; border-radius: 10px; background: rgba(255, 255, 255, 0.04); box-shadow: inset 0 0 0 1px var(--line); cursor: pointer; touch-action: none; }
+.tsel { position: absolute; top: 0; bottom: 0; border-radius: 10px; background: rgba(125, 211, 252, 0.13); box-shadow: inset 0 0 0 1.5px var(--arc); pointer-events: none; }
+.thead { position: absolute; top: -5px; bottom: -5px; width: 2px; margin-left: -1px; border-radius: 2px; background: var(--ink); pointer-events: none; transition: left 250ms linear; }
+.thandle { position: absolute; top: 50%; width: 14px; height: 44px; margin: -22px 0 0 -7px; padding: 0; border: 0; border-radius: 7px; cursor: ew-resize; background: var(--arc); box-shadow: 0 6px 20px -6px rgba(125, 211, 252, 0.9); transition: transform 400ms var(--ease); }
+.thandle::after { content: ""; position: absolute; left: 6px; top: 15px; bottom: 15px; width: 2px; border-radius: 1px; background: rgba(4, 16, 25, 0.45); }
+.thandle:hover, .thandle.drag { transform: scaleY(1.08); }
+.thandle:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.trow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+.ttime { flex: 1; min-width: 180px; font: 500 13px/1.3 var(--mono); color: var(--ink-2); }
+.ttime b { font-weight: 500; color: var(--ink); }
+.btn.plain { padding: 6px 8px 6px 14px; gap: 6px; }
+.trow kbd { min-width: 0; padding: 4px 7px; font-size: 11px; }
+.btn:disabled { opacity: 0.35; cursor: default; transform: none; }
 .pbar { display: flex; align-items: center; gap: 12px; padding: 16px 18px; }
 .pbar div { flex: 1; min-width: 0; }
 .pbar .cname { font: 400 20px/1.2 var(--display); font-stretch: 87%; }
@@ -460,6 +475,19 @@ select {
   <button class="iconbtn pnav next" id="pNext" aria-label="Next clip"><svg viewBox="0 0 16 16" fill="none"><path d="M6 3.5L10.5 8 6 12.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
   <div class="shell pframe"><div class="core">
     <video id="pVideo" controls playsinline preload="auto"></video>
+    <div class="trim">
+      <div class="ttrack" id="tTrack" aria-label="Cut range">
+        <div class="tsel" id="tSel"></div><i class="thead" id="tHead"></i>
+        <button class="thandle" id="tIn" data-end="in" aria-label="Cut start (arrow keys move it)"></button>
+        <button class="thandle" id="tOut" data-end="out" aria-label="Cut end (arrow keys move it)"></button>
+      </div>
+      <div class="trow">
+        <div class="ttime" id="tTimes"></div>
+        <button class="btn small plain" id="tSetIn">Start here<kbd>I</kbd></button>
+        <button class="btn small plain" id="tSetOut">End here<kbd>O</kbd></button>
+        <button class="btn small primary" id="tSave" disabled>Save cut<span class="ic"><svg viewBox="0 0 16 16" fill="none"><circle cx="4.5" cy="4.5" r="2" stroke="currentColor" stroke-width="1.3"/><circle cx="4.5" cy="11.5" r="2" stroke="currentColor" stroke-width="1.3"/><path d="M6.2 5.6L13 12M6.2 10.4L13 4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></span></button>
+      </div>
+    </div>
     <div class="pbar">
       <div><div class="cname" id="pName"></div><div class="csub" id="pSub"></div></div>
       <button class="iconbtn" id="pReveal" aria-label="Show in folder"></button>
@@ -693,9 +721,77 @@ $("pReveal").onclick = () => { const c = state.clips[playing]; if (c) post("api/
 document.addEventListener("keydown", (e) => {
   if (playing < 0) return;
   if (e.key === "Escape") closePlayer();
+  else if (e.target.closest(".trim")) return;
+  else if (e.key === "i" || e.key === "I") setCut("in", pv.currentTime);
+  else if (e.key === "o" || e.key === "O") setCut("out", pv.currentTime);
   else if (e.key === "ArrowLeft" && e.target !== pv) openPlayer(Math.max(0, playing - 1));
   else if (e.key === "ArrowRight" && e.target !== pv) openPlayer(Math.min(state.clips.length - 1, playing + 1));
 });
+
+// Cutter: pick a start and end on the timeline (or I / O at the playhead).
+// Save cut writes "<name> cut.mp4" next to the clip without re-encoding, so
+// the cut begins on the keyframe at or before the start: at most 1 s early.
+const MIN_CUT = 0.5;
+let cutIn = 0, cutOut = 0;
+const dur = () => (isFinite(pv.duration) ? pv.duration : 0);
+const fmt = (t) => Math.floor(t / 60) + ":" + (t % 60).toFixed(1).padStart(4, "0");
+const pct = (t) => (dur() ? (t / dur()) * 100 : 0) + "%";
+function renderCut() {
+  const d = dur();
+  $("tSel").style.left = pct(cutIn);
+  $("tSel").style.right = "calc(100% - " + pct(cutOut) + ")";
+  $("tIn").style.left = pct(cutIn);
+  $("tOut").style.left = pct(cutOut);
+  const whole = cutIn < 0.05 && cutOut > d - 0.05;
+  $("tTimes").innerHTML = d ? `<b>${fmt(cutIn)}</b> – <b>${fmt(cutOut)}</b> · ${whole ? "whole clip" : (cutOut - cutIn).toFixed(1) + " s"}` : "";
+  $("tSave").disabled = !d || whole || cutOut - cutIn < MIN_CUT || $("tSave").dataset.busy;
+}
+function setCut(end, t) {
+  const d = dur(); if (!d) return;
+  if (end === "in") cutIn = Math.max(0, Math.min(t, cutOut - MIN_CUT));
+  else cutOut = Math.min(d, Math.max(t, cutIn + MIN_CUT));
+  renderCut();
+}
+pv.addEventListener("loadedmetadata", () => { cutIn = 0; cutOut = dur(); renderCut(); });
+pv.addEventListener("timeupdate", () => {
+  $("tHead").style.left = pct(pv.currentTime);
+  // Playing from inside the cut stops at its end, so the result is previewed.
+  if (!pv.paused && pv.currentTime >= cutOut && pv.currentTime - cutOut < 0.5 && cutOut < dur() - 0.05) pv.pause();
+});
+const track = $("tTrack");
+const timeAt = (e) => { const r = track.getBoundingClientRect(); return Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * dur(); };
+track.addEventListener("pointerdown", (e) => {
+  if (!dur()) return;
+  const handle = e.target.closest(".thandle");
+  if (!handle) { pv.currentTime = timeAt(e); return; }
+  e.preventDefault();
+  handle.classList.add("drag");
+  track.setPointerCapture(e.pointerId);
+  const move = (ev) => { setCut(handle.dataset.end, timeAt(ev)); pv.currentTime = handle.dataset.end === "in" ? cutIn : cutOut; };
+  const up = () => { handle.classList.remove("drag"); track.removeEventListener("pointermove", move); track.removeEventListener("pointerup", up); };
+  track.addEventListener("pointermove", move);
+  track.addEventListener("pointerup", up);
+});
+document.querySelectorAll(".thandle").forEach((h) => h.onkeydown = (e) => {
+  const step = e.key === "ArrowLeft" ? -0.5 : e.key === "ArrowRight" ? 0.5 : 0;
+  if (!step) return;
+  e.preventDefault();
+  setCut(h.dataset.end, (h.dataset.end === "in" ? cutIn : cutOut) + step);
+  pv.currentTime = h.dataset.end === "in" ? cutIn : cutOut;
+});
+$("tSetIn").onclick = () => setCut("in", pv.currentTime);
+$("tSetOut").onclick = () => setCut("out", pv.currentTime);
+$("tSave").onclick = async () => {
+  const c = state.clips[playing]; if (!c) return;
+  const b = $("tSave");
+  b.dataset.busy = "1"; b.firstChild.textContent = "Saving…"; renderCut();
+  try {
+    const r = await post(`api/trim?name=${encodeURIComponent(c.name)}&start=${Math.round(cutIn * 1000)}&end=${Math.round(cutOut * 1000)}`);
+    toast(r.error ? "Cut failed: " + r.error : "Saved " + r.name.replace(/\.mp4$/i, ""));
+    render(await api("api/state?full"));
+  } catch { toast("Cut failed"); }
+  delete b.dataset.busy; b.firstChild.textContent = "Save cut"; renderCut();
+};
 
 // Hidden or minimized window: pause every video and stop asking the app for
 // status, so the window costs nothing while you play.
